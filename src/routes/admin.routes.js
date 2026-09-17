@@ -9,7 +9,7 @@ const { isStartInPast } = require('../utils/time');
  * ========================================================== */
 
 // GET /api/admin/bookings/today -- การ์ดสรุป + รายการจองวันนี้
-router.get('/bookings/today', async (req, res) => {
+router.get('/bookings/today', async (req, res, next) => {
   try {
     await expireStalePendingBookings();
     const stats = await pool.query(`
@@ -35,12 +35,12 @@ router.get('/bookings/today', async (req, res) => {
       ORDER BY b.start_datetime`);
     res.json({ stats: stats.rows[0], bookings: list.rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // PATCH /api/admin/bookings/:id/confirm -- กดปุ่ม "ยืนยัน"
-router.patch('/bookings/:id/confirm', async (req, res) => {
+router.patch('/bookings/:id/confirm', async (req, res, next) => {
   try {
     const result = await pool.query(
       `UPDATE booking SET booking_status = 'confirmed', updated_at = now()
@@ -51,12 +51,12 @@ router.patch('/bookings/:id/confirm', async (req, res) => {
     if (!result.rows.length) return res.status(404).json({ error: 'ไม่พบรายการ หรือสถานะไม่ใช่ pending' });
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // PATCH /api/admin/bookings/:id/reject  { reason } -- กดปุ่ม "ปฏิเสธ" / "ยืนยันยกเลิก"
-router.patch('/bookings/:id/reject', async (req, res) => {
+router.patch('/bookings/:id/reject', async (req, res, next) => {
   try {
     const result = await pool.query(
       `UPDATE booking SET booking_status = 'cancelled', cancel_reason = $2, updated_at = now()
@@ -67,12 +67,12 @@ router.patch('/bookings/:id/reject', async (req, res) => {
     if (!result.rows.length) return res.status(404).json({ error: 'ไม่พบรายการ' });
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // POST /api/admin/bookings/walkin -- ฟอร์ม "เพิ่มรายการจองวอล์คอิน"
-router.post('/bookings/walkin', async (req, res) => {
+router.post('/bookings/walkin', async (req, res, next) => {
   const { roomId, startDatetime, endDatetime, customerName, customerPhone, adminUserId } = req.body;
   if (!roomId || !startDatetime || !endDatetime) {
     return res.status(400).json({ error: 'ข้อมูลไม่ครบ (roomId, startDatetime, endDatetime)' });
@@ -115,12 +115,12 @@ router.post('/bookings/walkin', async (req, res) => {
     if (err.code === '23P01') {
       return res.status(409).json({ error: 'ช่วงเวลานี้ถูกจองไปแล้ว' });
     }
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // GET /api/admin/bookings/history -- หน้า "ประวัติการจอง" ของแอดมิน (ทุกสถานะ)
-router.get('/bookings/history', async (req, res) => {
+router.get('/bookings/history', async (req, res, next) => {
   try {
     await expireStalePendingBookings();
     const result = await pool.query(`
@@ -136,7 +136,7 @@ router.get('/bookings/history', async (req, res) => {
       ORDER BY b.created_at DESC`);
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
@@ -145,7 +145,7 @@ router.get('/bookings/history', async (req, res) => {
  * ========================================================== */
 
 // PATCH /api/admin/payments/:id/verify  { adminUserId, approve }
-router.patch('/payments/:id/verify', async (req, res) => {
+router.patch('/payments/:id/verify', async (req, res, next) => {
   const { adminUserId, approve } = req.body;
   const client = await pool.connect();
   try {
@@ -170,7 +170,7 @@ router.patch('/payments/:id/verify', async (req, res) => {
     res.json(payResult.rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: err.message });
+    next(err);
   } finally {
     client.release();
   }
@@ -181,19 +181,19 @@ router.patch('/payments/:id/verify', async (req, res) => {
  * ========================================================== */
 
 // GET /api/admin/shop
-router.get('/shop', async (req, res) => {
+router.get('/shop', async (req, res, next) => {
   try {
     const shop = await pool.query('SELECT * FROM shop ORDER BY shop_id LIMIT 1');
     const hours = await pool.query('SELECT * FROM shop_hours ORDER BY day_of_week');
     if (!shop.rows.length) return res.status(404).json({ error: 'ยังไม่ได้ตั้งค่าร้าน' });
     res.json({ ...shop.rows[0], hours: hours.rows });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // PATCH /api/admin/shop
-router.patch('/shop', async (req, res) => {
+router.patch('/shop', async (req, res, next) => {
   const { name, taxId, phone, address, bankName, bankAccountNo, bankAccountName, qrCodeUrl, peakStartTime, peakSurcharge } = req.body;
   try {
     const result = await pool.query(
@@ -216,12 +216,12 @@ router.patch('/shop', async (req, res) => {
     if (!result.rows.length) return res.status(404).json({ error: 'ยังไม่ได้ตั้งค่าร้าน' });
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // PATCH /api/admin/shop/hours   { hours: [{ dayOfWeek, openHour, closeHour }, ...] }
-router.patch('/shop/hours', async (req, res) => {
+router.patch('/shop/hours', async (req, res, next) => {
   const { hours } = req.body;
   if (!Array.isArray(hours) || !hours.length) {
     return res.status(400).json({ error: 'ต้องส่ง hours เป็น array' });
@@ -244,7 +244,7 @@ router.patch('/shop/hours', async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: err.message });
+    next(err);
   } finally {
     client.release();
   }
@@ -255,17 +255,17 @@ router.patch('/shop/hours', async (req, res) => {
  * ========================================================== */
 
 // GET /api/admin/rooms
-router.get('/rooms', async (req, res) => {
+router.get('/rooms', async (req, res, next) => {
   try {
     const result = await pool.query('SELECT * FROM room ORDER BY room_id');
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // PATCH /api/admin/rooms/:id
-router.patch('/rooms/:id', async (req, res) => {
+router.patch('/rooms/:id', async (req, res, next) => {
   const { roomName, size, capacity, pricePerHour, imageUrl, isActive } = req.body;
   let { description } = req.body;
   if (typeof description === 'string') {
@@ -291,12 +291,12 @@ router.patch('/rooms/:id', async (req, res) => {
     if (!result.rows.length) return res.status(404).json({ error: 'ไม่พบห้อง' });
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // POST /api/admin/rooms -- เพิ่มห้องใหม่ (ปุ่ม + ในหน้า "ตั้งค่าห้อง")
-router.post('/rooms', async (req, res) => {
+router.post('/rooms', async (req, res, next) => {
   const { roomName, size, capacity, pricePerHour, imageUrl, description } = req.body;
   try {
     const shop = (await pool.query('SELECT shop_id FROM shop ORDER BY shop_id LIMIT 1')).rows[0];
@@ -309,12 +309,12 @@ router.post('/rooms', async (req, res) => {
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // DELETE /api/admin/rooms/:id -- ลบห้อง (แทนที่การปิดใช้งานห้องในหน้า "ตั้งค่าห้อง")
-router.delete('/rooms/:id', async (req, res) => {
+router.delete('/rooms/:id', async (req, res, next) => {
   try {
     const result = await pool.query('DELETE FROM room WHERE room_id = $1 RETURNING *', [req.params.id]);
     if (!result.rows.length) return res.status(404).json({ error: 'ไม่พบห้อง' });
@@ -323,7 +323,7 @@ router.delete('/rooms/:id', async (req, res) => {
     if (err.code === '23503') {
       return res.status(409).json({ error: 'ลบห้องนี้ไม่ได้ เนื่องจากมีประวัติการจองผูกอยู่กับห้องนี้แล้ว' });
     }
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
@@ -332,7 +332,7 @@ router.delete('/rooms/:id', async (req, res) => {
  * ========================================================== */
 
 // GET /api/admin/reports?period=day|week|month
-router.get('/reports', async (req, res) => {
+router.get('/reports', async (req, res, next) => {
   const period = req.query.period || 'day';
   const trunc = period === 'month' ? 'month' : period === 'week' ? 'week' : 'day';
   try {
@@ -357,7 +357,7 @@ router.get('/reports', async (req, res) => {
       WHERE booking_status IN ('confirmed','completed')`);
     res.json({ period, trend: trend.rows, byRoom: byRoom.rows, totals: totals.rows[0] });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 

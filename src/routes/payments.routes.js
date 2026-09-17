@@ -4,7 +4,7 @@ const { expireStalePendingBookings } = require('../utils/expireBookings');
 
 // POST /api/payments  { bookingId, amount, method, evidenceUrl }
 // -- ลูกค้าแนบสลิปการโอนเงินมัดจำ (หน้า "ยืนยันและชำระมัดจำ")
-router.post('/', async (req, res) => {
+router.post('/', async (req, res, next) => {
   const { bookingId, amount, method, evidenceUrl } = req.body;
   if (!bookingId || !amount) {
     return res.status(400).json({ error: 'ข้อมูลไม่ครบ (bookingId, amount)' });
@@ -39,7 +39,7 @@ router.post('/', async (req, res) => {
     res.status(201).json(payment.rows[0]);
   } catch (err) {
     await client.query('ROLLBACK');
-    res.status(500).json({ error: err.message });
+    next(err);
   } finally {
     client.release();
   }

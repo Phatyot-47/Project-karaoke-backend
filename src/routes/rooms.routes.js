@@ -3,7 +3,7 @@ const pool = require('../db');
 const { expireStalePendingBookings } = require('../utils/expireBookings');
 
 // GET /api/rooms?size=S  -- หน้า "เลือกห้องคาราโอเกะ"
-router.get('/', async (req, res) => {
+router.get('/', async (req, res, next) => {
   const { size } = req.query;
   try {
     const params = [];
@@ -17,23 +17,23 @@ router.get('/', async (req, res) => {
     const result = await pool.query(sql, params);
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // GET /api/rooms/:id  -- รายละเอียดห้องเดียว (หน้าจองห้อง)
-router.get('/:id', async (req, res) => {
+router.get('/:id', async (req, res, next) => {
   try {
     const result = await pool.query('SELECT * FROM room WHERE room_id = $1', [req.params.id]);
     if (!result.rows.length) return res.status(404).json({ error: 'ไม่พบห้อง' });
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // GET /api/rooms/:id/availability?date=YYYY-MM-DD -- ช่วงเวลาที่ถูกจองแล้ว (หน้าเลือกเวลา)
-router.get('/:id/availability', async (req, res) => {
+router.get('/:id/availability', async (req, res, next) => {
   const { date } = req.query;
   if (!date) return res.status(400).json({ error: 'ต้องระบุ date (YYYY-MM-DD)' });
   try {
@@ -47,7 +47,7 @@ router.get('/:id/availability', async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 

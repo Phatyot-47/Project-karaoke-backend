@@ -1,8 +1,21 @@
 const router = require('express').Router();
+const rateLimit = require('express-rate-limit');
 const pool = require('../db');
 
+// จำกัดจำนวนครั้ง login/register ต่อ IP กัน brute-force เดารหัส admin หรือเบอร์โทรลูกค้า
+// (login ลูกค้าใช้แค่เบอร์โทรไม่มีรหัสผ่าน จึงยิ่งต้องกันการเดาเบอร์รัวๆ)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'พยายามเข้าสู่ระบบบ่อยเกินไป กรุณาลองใหม่ภายหลัง' },
+});
+
+router.use(authLimiter);
+
 // POST /api/auth/register  { name, phone }  -- สมัครสมาชิกลูกค้า
-router.post('/register', async (req, res) => {
+router.post('/register', async (req, res, next) => {
   const { name, phone } = req.body;
   if (!name || !phone || phone.trim().length < 9) {
     return res.status(400).json({ error: 'กรุณากรอกชื่อและเบอร์โทรศัพท์ให้ครบถ้วน' });
@@ -19,12 +32,12 @@ router.post('/register', async (req, res) => {
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // POST /api/auth/login  { phone }  -- ลูกค้าเข้าสู่ระบบด้วยเบอร์โทร
-router.post('/login', async (req, res) => {
+router.post('/login', async (req, res, next) => {
   const { phone } = req.body;
   if (!phone || phone.trim().length < 9) {
     return res.status(400).json({ error: 'กรุณากรอกเบอร์โทรศัพท์ให้ถูกต้อง' });
@@ -39,12 +52,12 @@ router.post('/login', async (req, res) => {
     }
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // POST /api/auth/admin-login  { username, password }  -- แอดมินเข้าสู่ระบบ
-router.post('/admin-login', async (req, res) => {
+router.post('/admin-login', async (req, res, next) => {
   const { username, password } = req.body;
   if (!username || !password) {
     return res.status(400).json({ error: 'กรุณากรอก username และ password' });
@@ -60,7 +73,7 @@ router.post('/admin-login', async (req, res) => {
     }
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
