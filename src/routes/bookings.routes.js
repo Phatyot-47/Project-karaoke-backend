@@ -11,6 +11,11 @@ router.post('/', async (req, res) => {
   if (!roomId || !startDatetime || !endDatetime) {
     return res.status(400).json({ error: 'ข้อมูลไม่ครบ (roomId, startDatetime, endDatetime)' });
   }
+  // endpoint นี้ใช้เฉพาะ flow ลูกค้า login แล้วจอง (ไม่มี walkin_name ให้ fallback แบบฝั่งแอดมิน)
+  // ต้องมี customerId เป็นเลขจำนวนเต็มบวกเสมอ ไม่งั้นจะไปชน CHECK/FK constraint ที่ DB แล้วหลุดเป็น 500
+  if (!Number.isInteger(Number(customerId)) || Number(customerId) <= 0) {
+    return res.status(400).json({ error: 'ต้องระบุ customerId ที่ถูกต้อง กรุณาเข้าสู่ระบบใหม่' });
+  }
   if (isStartInPast(startDatetime)) {
     return res.status(400).json({ error: 'เวลาที่เลือกผ่านไปแล้ว กรุณาเลือกเวลาอื่น' });
   }
@@ -44,7 +49,7 @@ router.post('/', async (req, res) => {
          base_price, peak_surcharge_total, price_total, deposit_required, deposit_status
        ) VALUES ($1,$2,$3,$4,'customer_online',$5,$6,$7,$8,'pending',$9,$10,$11,$12,'unpaid')
        RETURNING *`,
-      [bookingCode, customerId || null, roomId, policy.policy_id, bookingDate, startDatetime, endDatetime,
+      [bookingCode, Number(customerId), roomId, policy.policy_id, bookingDate, startDatetime, endDatetime,
         guestCount || null, basePrice, peakSurchargeTotal, priceTotal, depositRequired]
     );
     res.status(201).json(insertResult.rows[0]);
@@ -52,12 +57,16 @@ router.post('/', async (req, res) => {
     if (err.code === '23P01') {
       return res.status(409).json({ error: 'ช่วงเวลานี้ถูกจองไปแล้ว กรุณาเลือกเวลาอื่น' });
     }
-    res.status(500).json({ error: err.message });
+    if (err.code === '23503') {
+      return res.status(404).json({ error: 'ไม่พบบัญชีผู้ใช้นี้ กรุณาเข้าสู่ระบบใหม่' });
+    }
+    console.error('POST /api/bookings error:', err);
+    res.status(500).json({ error: 'เกิดข้อผิดพลาดในระบบ กรุณาลองใหม่อีกครั้ง' });
   }
 });
 
 // GET /api/bookings/customer/:customerId -- หน้า "ประวัติการจอง" ของลูกค้า
-router.get('/customer/:customerId', async (req, res) => {
+router.get('/customer/:customerId', async (req, res, next) => {
   try {
     await expireStalePendingBookings();
     const result = await pool.query(
@@ -69,12 +78,12 @@ router.get('/customer/:customerId', async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
 // PATCH /api/bookings/:id/cancel  { reason } -- ลูกค้ายกเลิกการจองของตัวเอง
-router.patch('/:id/cancel', async (req, res) => {
+router.patch('/:id/cancel', async (req, res, next) => {
   try {
     const result = await pool.query(
       `UPDATE booking SET booking_status = 'cancelled', cancel_reason = $2, updated_at = now()
@@ -85,7 +94,7 @@ router.patch('/:id/cancel', async (req, res) => {
     if (!result.rows.length) return res.status(404).json({ error: 'ไม่พบรายการ หรือยกเลิกไม่ได้แล้ว' });
     res.json(result.rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 });
 
