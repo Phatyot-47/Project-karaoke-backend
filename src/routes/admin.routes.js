@@ -1,8 +1,20 @@
 const router = require('express').Router();
 const pool = require('../db');
-const { calculateBookingPrice } = require('../utils/pricing');
+const { quoteBooking } = require('../utils/quoteBooking');
 const { expireStalePendingBookings } = require('../utils/expireBookings');
 const { isStartInPast } = require('../utils/time');
+
+// รายการจอง + ชื่อห้อง/ลูกค้า + สลิปล่าสุด — ใช้ร่วมกันระหว่างหน้าอนุมัติการจอง (วันนี้) และหน้าประวัติ
+const BOOKING_LIST_SQL = `
+      SELECT b.*, r.room_name, r.image_url, COALESCE(u.name, b.walkin_name) AS customer_name,
+        p.payment_id, p.evidence_url, p.payment_status
+      FROM booking b
+      JOIN room r ON r.room_id = b.room_id
+      LEFT JOIN users u ON u.user_id = b.customer_id
+      LEFT JOIN LATERAL (
+        SELECT * FROM payment WHERE payment.booking_id = b.booking_id
+        ORDER BY payment_id DESC LIMIT 1
+      ) p ON true`;
 
 /* ============================================================
  * อนุมัติการจอง (หน้า "อนุมัติการจอง")
@@ -21,16 +33,7 @@ router.get('/bookings/today', async (req, res, next) => {
           WHERE booking_status IN ('confirmed','completed') AND booking_date = CURRENT_DATE
         ), 0) AS revenue_today
       FROM booking`);
-    const list = await pool.query(`
-      SELECT b.*, r.room_name, r.image_url, COALESCE(u.name, b.walkin_name) AS customer_name,
-        p.payment_id, p.evidence_url, p.payment_status
-      FROM booking b
-      JOIN room r ON r.room_id = b.room_id
-      LEFT JOIN users u ON u.user_id = b.customer_id
-      LEFT JOIN LATERAL (
-        SELECT * FROM payment WHERE payment.booking_id = b.booking_id
-        ORDER BY payment_id DESC LIMIT 1
-      ) p ON true
+    const list = await pool.query(`${BOOKING_LIST_SQL}
       WHERE b.booking_date = CURRENT_DATE
       ORDER BY b.start_datetime`);
     res.json({ stats: stats.rows[0], bookings: list.rows });
@@ -86,19 +89,8 @@ router.post('/bookings/walkin', async (req, res, next) => {
     if (!roomResult.rows.length) return res.status(404).json({ error: 'ไม่พบห้อง' });
     const room = roomResult.rows[0];
 
-    const shop = (await pool.query('SELECT * FROM shop ORDER BY shop_id LIMIT 1')).rows[0];
-    const policy = (await pool.query('SELECT * FROM shop_policy ORDER BY effective_from DESC LIMIT 1')).rows[0];
-
-    const { basePrice, peakSurchargeTotal, priceTotal } = calculateBookingPrice({
-      pricePerHour: Number(room.price_per_hour),
-      peakStartTime: shop.peak_start_time,
-      peakSurcharge: Number(shop.peak_surcharge || 0),
-      startDatetime,
-      endDatetime,
-    });
-    const depositRequired = Math.round((priceTotal * Number(policy.deposit_percent)) / 100);
-    const bookingDate = startDatetime.slice(0, 10);
-    const bookingCode = 'BK-' + Date.now();
+    const { basePrice, peakSurchargeTotal, priceTotal, depositRequired, policyId, bookingDate, bookingCode } =
+      await quoteBooking(room, startDatetime, endDatetime);
 
     const result = await pool.query(
       `INSERT INTO booking (
@@ -107,11 +99,12 @@ router.post('/bookings/walkin', async (req, res, next) => {
          booking_status, base_price, peak_surcharge_total, price_total, deposit_required, deposit_status
        ) VALUES ($1,$2,$3,$4,'admin_walkin',$5,$6,$7,$8,$9,'confirmed',$10,$11,$12,$13,'paid')
        RETURNING *`,
-      [bookingCode, adminUserId || null, roomId, policy.policy_id, bookingDate, startDatetime, endDatetime,
+      [bookingCode, adminUserId || null, roomId, policyId, bookingDate, startDatetime, endDatetime,
         customerName || 'ลูกค้าหน้าร้าน', customerPhone || null, basePrice, peakSurchargeTotal, priceTotal, depositRequired]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
     if (err.code === '23P01') {
       return res.status(409).json({ error: 'ช่วงเวลานี้ถูกจองไปแล้ว' });
     }
@@ -123,16 +116,7 @@ router.post('/bookings/walkin', async (req, res, next) => {
 router.get('/bookings/history', async (req, res, next) => {
   try {
     await expireStalePendingBookings();
-    const result = await pool.query(`
-      SELECT b.*, r.room_name, r.image_url, COALESCE(u.name, b.walkin_name) AS customer_name,
-        p.payment_id, p.evidence_url, p.payment_status
-      FROM booking b
-      JOIN room r ON r.room_id = b.room_id
-      LEFT JOIN users u ON u.user_id = b.customer_id
-      LEFT JOIN LATERAL (
-        SELECT * FROM payment WHERE payment.booking_id = b.booking_id
-        ORDER BY payment_id DESC LIMIT 1
-      ) p ON true
+    const result = await pool.query(`${BOOKING_LIST_SQL}
       ORDER BY b.created_at DESC`);
     res.json(result.rows);
   } catch (err) {
