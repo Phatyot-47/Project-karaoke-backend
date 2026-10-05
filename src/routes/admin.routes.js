@@ -305,11 +305,16 @@ router.patch('/bookings/:id/check-out', async (req, res, next) => {
   }
 });
 
+const WALKIN_MIN_MINUTES = 60; // วอล์คอินจองขั้นต่ำ 1 ชม. — ต้องตรงกับ WALKIN_MIN_SLOTS ฝั่ง frontend
+
 // POST /api/admin/bookings/walkin -- ฟอร์ม "เพิ่มรายการจองวอล์คอิน"
 router.post('/bookings/walkin', async (req, res, next) => {
   const { roomId, startDatetime, endDatetime, customerName, customerPhone, adminUserId } = req.body;
   if (!roomId || !startDatetime || !endDatetime) {
     return res.status(400).json({ error: 'ข้อมูลไม่ครบ (roomId, startDatetime, endDatetime)' });
+  }
+  if (!((new Date(endDatetime) - new Date(startDatetime)) / 60000 >= WALKIN_MIN_MINUTES)) {
+    return res.status(400).json({ error: 'วอล์คอินต้องจองอย่างน้อย 1 ชั่วโมง' });
   }
   if (isStartInPast(startDatetime)) {
     return res.status(400).json({ error: 'เวลาที่เลือกผ่านไปแล้ว กรุณาเลือกเวลาอื่น' });
@@ -378,28 +383,44 @@ router.get('/bookings/history', async (req, res, next) => {
  * ตรวจสอบสลิปการชำระเงิน
  * ========================================================== */
 
-// PATCH /api/admin/payments/:id/verify  { adminUserId, approve }
+// PATCH /api/admin/payments/:id/verify  { adminUserId, approve, reason }
+// อนุมัติ = มัดจำ paid / ปฏิเสธ = ยกเลิกการจองทันทีพร้อมเหตุผลให้ลูกค้าเห็น และปล่อยช่วงเวลาคืน
+// (เดิมปฏิเสธแล้วแค่ตั้ง deposit เป็น unpaid ทำให้ระบบหมดเวลาชำระยกเลิกให้เองแบบเงียบๆ และลูกค้าแนบสลิปใหม่ไม่ได้อยู่แล้ว)
+// ตรวจได้เฉพาะสลิปที่ยังรอตรวจ กันการกดซ้ำเปลี่ยนผลที่ตัดสินไปแล้ว
 router.patch('/payments/:id/verify', async (req, res, next) => {
   const { adminUserId, approve } = req.body;
+  const reason = (typeof req.body.reason === 'string' && req.body.reason.trim()) || 'สลิปไม่ผ่านการตรวจสอบ';
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const status = approve === false ? 'rejected' : 'paid';
     const payResult = await client.query(
-      `UPDATE payment SET payment_status = $2, verified_by = $3, verified_at = now()
-       WHERE payment_id = $1
+      `UPDATE payment SET payment_status = $2::varchar, verified_by = $3, verified_at = now(),
+         remark = CASE WHEN $2::varchar = 'rejected' THEN $4::text ELSE remark END
+       WHERE payment_id = $1 AND payment_status = 'pending'
        RETURNING *`,
-      [req.params.id, status, adminUserId || null]
+      [req.params.id, status, adminUserId || null, reason]
     );
     if (!payResult.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'ไม่พบรายการชำระเงิน' });
+      return res.status(404).json({ error: 'ไม่พบรายการชำระเงิน หรือสลิปนี้ตรวจไปแล้ว' });
     }
-    const depositStatus = status === 'paid' ? 'paid' : 'unpaid';
-    await client.query(
-      `UPDATE booking SET deposit_status = $2, updated_at = now() WHERE booking_id = $1`,
-      [payResult.rows[0].booking_id, depositStatus]
-    );
+    const bookingId = payResult.rows[0].booking_id;
+    if (status === 'paid') {
+      await client.query(
+        `UPDATE booking SET deposit_status = 'paid', updated_at = now() WHERE booking_id = $1`,
+        [bookingId]
+      );
+    } else {
+      await client.query(
+        `UPDATE booking SET deposit_status = 'unpaid',
+           booking_status = CASE WHEN booking_status IN ('pending','confirmed') THEN 'cancelled' ELSE booking_status END,
+           cancel_reason = CASE WHEN booking_status IN ('pending','confirmed') THEN $2 ELSE cancel_reason END,
+           updated_at = now()
+         WHERE booking_id = $1`,
+        [bookingId, 'ปฏิเสธสลิป: ' + reason]
+      );
+    }
     await client.query('COMMIT');
     res.json(payResult.rows[0]);
   } catch (err) {
