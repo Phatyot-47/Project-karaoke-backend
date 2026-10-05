@@ -8,6 +8,7 @@ const bookingsRoutes = require('./routes/bookings.routes');
 const paymentsRoutes = require('./routes/payments.routes');
 const adminRoutes = require('./routes/admin.routes');
 const uploadsRoutes = require('./routes/uploads.routes');
+const usersRoutes = require('./routes/users.routes');
 
 const app = express();
 app.use(cors());
@@ -24,6 +25,7 @@ app.use('/api/bookings', bookingsRoutes);
 app.use('/api/payments', paymentsRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/uploads', uploadsRoutes);
+app.use('/api/users', usersRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'ไม่พบ endpoint นี้' });
