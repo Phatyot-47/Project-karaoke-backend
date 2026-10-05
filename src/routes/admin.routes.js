@@ -22,7 +22,9 @@ router.get('/bookings/today', async (req, res, next) => {
       WHERE booking_date = CURRENT_DATE`);
     const list = await pool.query(`
       SELECT b.*, r.room_name, r.image_url, COALESCE(u.name, b.walkin_name) AS customer_name,
-        p.payment_id, p.evidence_url, p.payment_status
+        p.payment_id, p.evidence_url, p.payment_status,
+        s.session_id, s.checkin_time, s.checkout_time, s.session_status, s.overtime_amount,
+        COALESCE(x.extend_minutes, 0) AS extended_minutes, COALESCE(x.extra_amount, 0) AS extension_amount
       FROM booking b
       JOIN room r ON r.room_id = b.room_id
       LEFT JOIN users u ON u.user_id = b.customer_id
@@ -30,7 +32,13 @@ router.get('/bookings/today', async (req, res, next) => {
         SELECT * FROM payment WHERE payment.booking_id = b.booking_id
         ORDER BY payment_id DESC LIMIT 1
       ) p ON true
-      WHERE b.booking_date = CURRENT_DATE
+      LEFT JOIN service_session s ON s.booking_id = b.booking_id
+      LEFT JOIN LATERAL (
+        SELECT SUM(extend_minutes) AS extend_minutes, SUM(extra_amount) AS extra_amount
+        FROM extension WHERE extension.session_id = s.session_id
+      ) x ON true
+      -- รอบที่ยังไม่ Check-out ให้แสดงต่อแม้เลยเที่ยงคืนไปแล้ว (เช่น ช่วง 23:30-00:00 ที่ออกช้า)
+      WHERE b.booking_date = CURRENT_DATE OR s.session_status = 'in_progress'
       ORDER BY b.start_datetime`);
     res.json({ stats: stats.rows[0], bookings: list.rows });
   } catch (err) {
@@ -119,6 +127,178 @@ router.patch('/bookings/:id/change-room', async (req, res, next) => {
     if (err.code === '23P01') {
       return res.status(409).json({ error: 'ห้องใหม่ไม่ว่างในช่วงเวลานี้ กรุณาเลือกห้องอื่น' });
     }
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
+/* ============================================================
+ * Check-in / Check-out / ต่อเวลา (ขอบเขตข้อ 2.6) — ตาราง service_session + extension
+ * ========================================================== */
+
+const CHECKIN_EARLY_MINUTES = 15;  // Check-in ได้ก่อนเวลาเริ่มไม่เกินกี่นาที
+const OVERTIME_GRACE_MINUTES = 10; // ออกช้าในแต่ละช่วง 30 นาทีไม่เกินนี้ ไม่คิดเงินช่วงนั้น
+const MAX_EXTEND_MINUTES = 240;
+
+// จำนวนช่วง 30 นาทีที่ต้องคิดค่าเกินเวลา: ช่วงไหนเลยเข้าไปเกิน 10 นาทีจึงคิด
+// เช่น ออกช้า 10 นาที = 0, 11 นาที = 1 ช่วง, 40 นาที = 1 ช่วง, 41 นาที = 2 ช่วง
+function overtimeHalfSlots(minutesLate) {
+  return minutesLate > OVERTIME_GRACE_MINUTES ? Math.ceil((minutesLate - OVERTIME_GRACE_MINUTES) / 30) : 0;
+}
+
+// ราคาของช่วงเวลาเพิ่ม (ต่อเวลา/เกินเวลา) — สูตรเดียวกับตอนจอง รวมค่าพีคไทม์
+async function priceForRange(client, pricePerHour, startDatetime, endDatetime) {
+  const shop = (await client.query('SELECT peak_start_time, peak_surcharge FROM shop ORDER BY shop_id LIMIT 1')).rows[0];
+  return calculateBookingPrice({
+    pricePerHour: Number(pricePerHour),
+    peakStartTime: shop?.peak_start_time,
+    peakSurcharge: Number(shop?.peak_surcharge || 0),
+    startDatetime,
+    endDatetime,
+  }).priceTotal;
+}
+
+// ดึง booking + ห้อง + รอบใช้บริการ แล้วล็อกแถว booking ไว้ตลอด transaction
+async function lockBookingWithSession(client, bookingId) {
+  const result = await client.query(
+    `SELECT b.booking_id, b.booking_status, b.booking_date, b.start_datetime, b.end_datetime, r.price_per_hour,
+            s.session_id, s.session_status,
+            LOCALTIMESTAMP >= b.start_datetime - make_interval(mins => $2) AS checkin_opened,
+            LOCALTIMESTAMP < b.end_datetime AS before_end,
+            FLOOR(EXTRACT(EPOCH FROM (LOCALTIMESTAMP - b.end_datetime)) / 60)::int AS minutes_late
+     FROM booking b
+     JOIN room r ON r.room_id = b.room_id
+     LEFT JOIN service_session s ON s.booking_id = b.booking_id
+     WHERE b.booking_id = $1
+     FOR UPDATE OF b`,
+    [bookingId, CHECKIN_EARLY_MINUTES]
+  );
+  return result.rows[0];
+}
+
+// PATCH /api/admin/bookings/:id/check-in  { adminUserId }
+router.patch('/bookings/:id/check-in', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const b = await lockBookingWithSession(client, req.params.id);
+    let error = null;
+    if (!b) error = [404, 'ไม่พบรายการจอง'];
+    else if (b.session_id) error = [409, 'รายการนี้ Check-in ไปแล้ว'];
+    else if (b.booking_status !== 'confirmed') error = [409, 'ต้องยืนยันการจองก่อนจึงจะ Check-in ได้'];
+    else if (!b.checkin_opened) error = [409, `Check-in ได้ก่อนเวลาเริ่มไม่เกิน ${CHECKIN_EARLY_MINUTES} นาที`];
+    else if (!b.before_end) error = [409, 'เลยเวลาสิ้นสุดของการจองแล้ว Check-in ไม่ได้'];
+    if (error) {
+      await client.query('ROLLBACK');
+      return res.status(error[0]).json({ error: error[1] });
+    }
+    const session = await client.query(
+      `INSERT INTO service_session (booking_id, checkin_time, checked_in_by, session_status)
+       VALUES ($1, LOCALTIMESTAMP, $2, 'in_progress')
+       RETURNING *`,
+      [b.booking_id, req.body.adminUserId || null]
+    );
+    await client.query('COMMIT');
+    res.status(201).json(session.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
+// PATCH /api/admin/bookings/:id/extend  { minutes, adminUserId } -- ต่อเวลาทีละ 30 นาที ราคาเดียวกับตอนจอง
+// เลื่อน booking.end_datetime ออกไปจริง ห้องชนกับการจองถัดไปหรือไม่ให้ exclusion constraint (23P01) ตัดสิน
+// และต่อได้ไม่เกินเวลาปิดร้านของวันนั้น (shop_hours.close_hour)
+router.patch('/bookings/:id/extend', async (req, res, next) => {
+  const minutes = Number(req.body.minutes);
+  if (!Number.isInteger(minutes) || minutes <= 0 || minutes % 30 !== 0 || minutes > MAX_EXTEND_MINUTES) {
+    return res.status(400).json({ error: `ต่อเวลาได้ทีละ 30 นาที (สูงสุด ${MAX_EXTEND_MINUTES / 60} ชม. ต่อครั้ง)` });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const b = await lockBookingWithSession(client, req.params.id);
+    if (!b || b.session_status !== 'in_progress') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'ต่อเวลาได้เฉพาะรายการที่ Check-in แล้วและยังไม่ Check-out' });
+    }
+    const limits = (await client.query(
+      `SELECT ($1::timestamp + make_interval(mins => $2)) AS new_end,
+              ($1::timestamp + make_interval(mins => $2)) > ($3::date + make_interval(hours => h.close_hour)) AS after_close
+       FROM shop_hours h
+       WHERE h.day_of_week = EXTRACT(DOW FROM $3::date)
+       ORDER BY h.shop_id LIMIT 1`,
+      [b.end_datetime, minutes, b.booking_date]
+    )).rows[0];
+    if (limits && limits.after_close) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'ต่อเวลาเกินเวลาปิดร้านไม่ได้' });
+    }
+    const newEnd = limits ? limits.new_end
+      : (await client.query('SELECT $1::timestamp + make_interval(mins => $2) AS t', [b.end_datetime, minutes])).rows[0].t;
+    const extraAmount = await priceForRange(client, b.price_per_hour, b.end_datetime, newEnd);
+    await client.query(
+      `UPDATE booking SET end_datetime = $2, price_total = price_total + $3, updated_at = now()
+       WHERE booking_id = $1`,
+      [b.booking_id, newEnd, extraAmount]
+    );
+    const ext = await client.query(
+      `INSERT INTO extension (session_id, extend_minutes, new_end_datetime, extra_amount, approved_by, created_at)
+       VALUES ($1, $2, $3, $4, $5, LOCALTIMESTAMP)
+       RETURNING *`,
+      [b.session_id, minutes, newEnd, extraAmount, req.body.adminUserId || null]
+    );
+    await client.query('COMMIT');
+    res.status(201).json(ext.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err.code === '23P01') {
+      return res.status(409).json({ error: 'ต่อเวลาไม่ได้ เพราะห้องนี้มีการจองถัดไปในช่วงเวลานั้นแล้ว' });
+    }
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
+// PATCH /api/admin/bookings/:id/check-out  { adminUserId }
+// ออกช้ากว่าเวลาสิ้นสุด คิดค่าเกินเวลาตาม overtimeHalfSlots() ด้วยราคาเดียวกับตอนจอง แล้วปิดงาน booking เป็น completed
+router.patch('/bookings/:id/check-out', async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const b = await lockBookingWithSession(client, req.params.id);
+    if (!b || b.session_status !== 'in_progress') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Check-out ได้เฉพาะรายการที่ Check-in แล้วและยังไม่ Check-out' });
+    }
+    const halfSlots = overtimeHalfSlots(b.minutes_late);
+    let overtimeAmount = 0;
+    if (halfSlots > 0) {
+      const overtimeEnd = (await client.query(
+        'SELECT $1::timestamp + make_interval(mins => $2) AS t', [b.end_datetime, halfSlots * 30]
+      )).rows[0].t;
+      overtimeAmount = await priceForRange(client, b.price_per_hour, b.end_datetime, overtimeEnd);
+    }
+    const session = await client.query(
+      `UPDATE service_session SET checkout_time = LOCALTIMESTAMP, checked_out_by = $2,
+         session_status = 'finished', overtime_amount = $3
+       WHERE session_id = $1
+       RETURNING *`,
+      [b.session_id, req.body.adminUserId || null, overtimeAmount]
+    );
+    await client.query(
+      `UPDATE booking SET booking_status = 'completed', price_total = price_total + $2, updated_at = now()
+       WHERE booking_id = $1`,
+      [b.booking_id, overtimeAmount]
+    );
+    await client.query('COMMIT');
+    res.json({ ...session.rows[0], minutes_late: Math.max(0, b.minutes_late) });
+  } catch (err) {
+    await client.query('ROLLBACK');
     next(err);
   } finally {
     client.release();
