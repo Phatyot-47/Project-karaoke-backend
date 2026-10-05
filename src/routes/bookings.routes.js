@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const pool = require('../db');
-const { calculateBookingPrice } = require('../utils/pricing');
+const { quoteBooking } = require('../utils/quoteBooking');
 const { expireStalePendingBookings } = require('../utils/expireBookings');
 const { isStartInPast } = require('../utils/time');
 
@@ -25,22 +25,8 @@ router.post('/', async (req, res) => {
     if (!roomResult.rows.length) return res.status(404).json({ error: 'ไม่พบห้อง หรือห้องปิดให้บริการ' });
     const room = roomResult.rows[0];
 
-    const shop = (await pool.query('SELECT * FROM shop ORDER BY shop_id LIMIT 1')).rows[0];
-    if (!shop) return res.status(500).json({ error: 'ยังไม่ได้ตั้งค่าร้าน' });
-
-    const policy = (await pool.query('SELECT * FROM shop_policy ORDER BY effective_from DESC LIMIT 1')).rows[0];
-    if (!policy) return res.status(500).json({ error: 'ยังไม่ได้ตั้งค่านโยบายมัดจำ' });
-
-    const { basePrice, peakSurchargeTotal, priceTotal } = calculateBookingPrice({
-      pricePerHour: Number(room.price_per_hour),
-      peakStartTime: shop.peak_start_time,
-      peakSurcharge: Number(shop.peak_surcharge || 0),
-      startDatetime,
-      endDatetime,
-    });
-    const depositRequired = Math.round((priceTotal * Number(policy.deposit_percent)) / 100);
-    const bookingDate = startDatetime.slice(0, 10);
-    const bookingCode = 'BK-' + Date.now();
+    const { basePrice, peakSurchargeTotal, priceTotal, depositRequired, policyId, bookingDate, bookingCode } =
+      await quoteBooking(room, startDatetime, endDatetime);
 
     const insertResult = await pool.query(
       `INSERT INTO booking (
@@ -49,11 +35,12 @@ router.post('/', async (req, res) => {
          base_price, peak_surcharge_total, price_total, deposit_required, deposit_status
        ) VALUES ($1,$2,$3,$4,'customer_online',$5,$6,$7,$8,'pending',$9,$10,$11,$12,'unpaid')
        RETURNING *`,
-      [bookingCode, Number(customerId), roomId, policy.policy_id, bookingDate, startDatetime, endDatetime,
+      [bookingCode, Number(customerId), roomId, policyId, bookingDate, startDatetime, endDatetime,
         guestCount || null, basePrice, peakSurchargeTotal, priceTotal, depositRequired]
     );
     res.status(201).json(insertResult.rows[0]);
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
     if (err.code === '23P01') {
       return res.status(409).json({ error: 'ช่วงเวลานี้ถูกจองไปแล้ว กรุณาเลือกเวลาอื่น' });
     }
