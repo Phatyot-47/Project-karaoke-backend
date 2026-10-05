@@ -4,12 +4,18 @@ const { calculateBookingPrice } = require('../utils/pricing');
 const { expireStalePendingBookings } = require('../utils/expireBookings');
 const { isStartInPast } = require('../utils/time');
 
-// POST /api/bookings  { customerId, roomId, startDatetime, endDatetime, guestCount }
+const NOTE_MAX_LENGTH = 300;
+
+// POST /api/bookings  { customerId, roomId, startDatetime, endDatetime, guestCount, note }
 // -- ลูกค้ายืนยันช่วงเวลาจอง (ก่อนไปหน้าชำระมัดจำ)
 router.post('/', async (req, res) => {
   const { customerId, roomId, startDatetime, endDatetime, guestCount } = req.body;
   if (!roomId || !startDatetime || !endDatetime) {
     return res.status(400).json({ error: 'ข้อมูลไม่ครบ (roomId, startDatetime, endDatetime)' });
+  }
+  const note = typeof req.body.note === 'string' ? req.body.note.trim() : '';
+  if (note.length > NOTE_MAX_LENGTH) {
+    return res.status(400).json({ error: `หมายเหตุต้องไม่เกิน ${NOTE_MAX_LENGTH} ตัวอักษร` });
   }
   // endpoint นี้ใช้เฉพาะ flow ลูกค้า login แล้วจอง (ไม่มี walkin_name ให้ fallback แบบฝั่งแอดมิน)
   // ต้องมี customerId เป็นเลขจำนวนเต็มบวกเสมอ ไม่งั้นจะไปชน CHECK/FK constraint ที่ DB แล้วหลุดเป็น 500
@@ -46,11 +52,11 @@ router.post('/', async (req, res) => {
       `INSERT INTO booking (
          booking_code, customer_id, room_id, policy_id, booking_source,
          booking_date, start_datetime, end_datetime, guest_count, booking_status,
-         base_price, peak_surcharge_total, price_total, deposit_required, deposit_status
-       ) VALUES ($1,$2,$3,$4,'customer_online',$5,$6,$7,$8,'pending',$9,$10,$11,$12,'unpaid')
+         base_price, peak_surcharge_total, price_total, deposit_required, deposit_status, note
+       ) VALUES ($1,$2,$3,$4,'customer_online',$5,$6,$7,$8,'pending',$9,$10,$11,$12,'unpaid',$13)
        RETURNING *`,
       [bookingCode, Number(customerId), roomId, policy.policy_id, bookingDate, startDatetime, endDatetime,
-        guestCount || null, basePrice, peakSurchargeTotal, priceTotal, depositRequired]
+        guestCount || null, basePrice, peakSurchargeTotal, priceTotal, depositRequired, note || null]
     );
     res.status(201).json(insertResult.rows[0]);
   } catch (err) {
@@ -83,18 +89,50 @@ router.get('/customer/:customerId', async (req, res, next) => {
 });
 
 // PATCH /api/bookings/:id/cancel  { reason } -- ลูกค้ายกเลิกการจองของตัวเอง
+// ยกเลิกได้เฉพาะก่อนเวลาเริ่มอย่างน้อย shop_policy.cancel_hours_before ชั่วโมง (ใช้นโยบายที่ผูกกับ booking นั้น
+// ถ้าไม่มีให้ใช้นโยบายล่าสุด) — เทียบกับ LOCALTIMESTAMP ของ DB ซึ่งตั้ง timezone เป็น Asia/Bangkok ไว้แล้ว
 router.patch('/:id/cancel', async (req, res, next) => {
+  const client = await pool.connect();
   try {
-    const result = await pool.query(
+    await client.query('BEGIN');
+    const found = await client.query(
+      `SELECT b.booking_status,
+              COALESCE(p.cancel_hours_before, latest.cancel_hours_before, 0) AS cancel_hours_before,
+              b.start_datetime > LOCALTIMESTAMP
+                + make_interval(hours => COALESCE(p.cancel_hours_before, latest.cancel_hours_before, 0)) AS within_window
+       FROM booking b
+       LEFT JOIN shop_policy p ON p.policy_id = b.policy_id
+       LEFT JOIN LATERAL (
+         SELECT cancel_hours_before FROM shop_policy ORDER BY effective_from DESC LIMIT 1
+       ) latest ON true
+       WHERE b.booking_id = $1
+       FOR UPDATE OF b`,
+      [req.params.id]
+    );
+    const booking = found.rows[0];
+    if (!booking || !['pending', 'confirmed'].includes(booking.booking_status)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'ไม่พบรายการ หรือยกเลิกไม่ได้แล้ว' });
+    }
+    if (!booking.within_window) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: `ยกเลิกได้ล่วงหน้าก่อนเวลาเริ่มอย่างน้อย ${booking.cancel_hours_before} ชั่วโมงเท่านั้น กรุณาติดต่อร้าน`,
+      });
+    }
+    const result = await client.query(
       `UPDATE booking SET booking_status = 'cancelled', cancel_reason = $2, updated_at = now()
-       WHERE booking_id = $1 AND booking_status IN ('pending','confirmed')
+       WHERE booking_id = $1
        RETURNING *`,
       [req.params.id, req.body.reason || 'ลูกค้ายกเลิกเอง']
     );
-    if (!result.rows.length) return res.status(404).json({ error: 'ไม่พบรายการ หรือยกเลิกไม่ได้แล้ว' });
+    await client.query('COMMIT');
     res.json(result.rows[0]);
   } catch (err) {
+    await client.query('ROLLBACK');
     next(err);
+  } finally {
+    client.release();
   }
 });
 

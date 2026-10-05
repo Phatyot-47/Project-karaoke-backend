@@ -17,10 +17,9 @@ router.get('/bookings/today', async (req, res, next) => {
         COUNT(*) FILTER (WHERE booking_status = 'pending')   AS pending_count,
         COUNT(*) FILTER (WHERE booking_status = 'confirmed') AS in_progress_count,
         COUNT(*) FILTER (WHERE booking_status = 'completed') AS completed_count,
-        COALESCE(SUM(price_total) FILTER (
-          WHERE booking_status IN ('confirmed','completed') AND booking_date = CURRENT_DATE
-        ), 0) AS revenue_today
-      FROM booking`);
+        COALESCE(SUM(price_total) FILTER (WHERE booking_status IN ('confirmed','completed')), 0) AS revenue_today
+      FROM booking
+      WHERE booking_date = CURRENT_DATE`);
     const list = await pool.query(`
       SELECT b.*, r.room_name, r.image_url, COALESCE(u.name, b.walkin_name) AS customer_name,
         p.payment_id, p.evidence_url, p.payment_status
@@ -68,6 +67,61 @@ router.patch('/bookings/:id/reject', async (req, res, next) => {
     res.json(result.rows[0]);
   } catch (err) {
     next(err);
+  }
+});
+
+// PATCH /api/admin/bookings/:id/change-room  { roomId } -- ย้ายลูกค้าไปห้องอื่น (ช่วงเวลาเดิม ราคาเดิม)
+// DB ไม่มีตารางประวัติการย้ายห้อง จึงต่อท้ายบันทึกการย้ายไว้ใน booking.note แทน
+// ห้องใหม่ชนกับการจองอื่นหรือไม่ ให้ exclusion constraint (23P01) ของ booking เป็นตัวตัดสิน
+router.patch('/bookings/:id/change-room', async (req, res, next) => {
+  const newRoomId = Number(req.body.roomId);
+  if (!Number.isInteger(newRoomId) || newRoomId <= 0) {
+    return res.status(400).json({ error: 'กรุณาเลือกห้องที่จะย้ายไป' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const found = await client.query(
+      `SELECT b.booking_status, b.room_id, r.room_name
+       FROM booking b JOIN room r ON r.room_id = b.room_id
+       WHERE b.booking_id = $1
+       FOR UPDATE OF b`,
+      [req.params.id]
+    );
+    const booking = found.rows[0];
+    if (!booking || !['pending', 'confirmed'].includes(booking.booking_status)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'ไม่พบรายการ หรือรายการนี้ย้ายห้องไม่ได้แล้ว' });
+    }
+    if (booking.room_id === newRoomId) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'ห้องใหม่ต้องไม่ใช่ห้องเดิม' });
+    }
+    const newRoom = (await client.query('SELECT room_name FROM room WHERE room_id = $1 AND is_active = true', [newRoomId])).rows[0];
+    if (!newRoom) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'ไม่พบห้องใหม่ หรือห้องปิดให้บริการ' });
+    }
+    const result = await client.query(
+      `UPDATE booking SET
+         room_id = $2,
+         note = concat_ws(E'\\n', note,
+           '[ย้ายห้อง ' || to_char(LOCALTIMESTAMP, 'YYYY-MM-DD HH24:MI') || '] จาก ' || $3::text || ' เป็น ' || $4::text),
+         updated_at = now()
+       WHERE booking_id = $1
+       RETURNING *`,
+      [req.params.id, newRoomId, booking.room_name, newRoom.room_name]
+    );
+    await client.query('COMMIT');
+    res.json(result.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err.code === '23P01') {
+      return res.status(409).json({ error: 'ห้องใหม่ไม่ว่างในช่วงเวลานี้ กรุณาเลือกห้องอื่น' });
+    }
+    next(err);
+  } finally {
+    client.release();
   }
 });
 
@@ -194,7 +248,7 @@ router.get('/shop', async (req, res, next) => {
 
 // PATCH /api/admin/shop
 router.patch('/shop', async (req, res, next) => {
-  const { name, taxId, phone, address, bankName, bankAccountNo, bankAccountName, qrCodeUrl, peakStartTime, peakSurcharge } = req.body;
+  const { name, taxId, phone, address, bankName, bankAccountNo, bankAccountName, qrCodeUrl, peakStartTime, peakSurcharge, floorPlanUrl } = req.body;
   try {
     const result = await pool.query(
       `UPDATE shop SET
@@ -208,10 +262,11 @@ router.patch('/shop', async (req, res, next) => {
          qr_code_url = COALESCE($8, qr_code_url),
          peak_start_time = COALESCE($9, peak_start_time),
          peak_surcharge = COALESCE($10, peak_surcharge),
+         floor_plan_url = COALESCE($11, floor_plan_url),
          updated_at = now()
        WHERE shop_id = (SELECT shop_id FROM shop ORDER BY shop_id LIMIT 1)
        RETURNING *`,
-      [name, taxId, phone, address, bankName, bankAccountNo, bankAccountName, qrCodeUrl, peakStartTime, peakSurcharge]
+      [name, taxId, phone, address, bankName, bankAccountNo, bankAccountName, qrCodeUrl, peakStartTime, peakSurcharge, floorPlanUrl]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'ยังไม่ได้ตั้งค่าร้าน' });
     res.json(result.rows[0]);
@@ -267,11 +322,17 @@ router.get('/rooms', async (req, res, next) => {
 // PATCH /api/admin/rooms/:id
 router.patch('/rooms/:id', async (req, res, next) => {
   const { roomName, size, capacity, pricePerHour, imageUrl, isActive } = req.body;
-  let { description } = req.body;
+  let { description, theme } = req.body;
   if (typeof description === 'string') {
     description = description.trim();
     if (description.length > 300) {
       return res.status(400).json({ error: 'หมายเหตุต้องไม่เกิน 300 ตัวอักษร' });
+    }
+  }
+  if (typeof theme === 'string') {
+    theme = theme.trim();
+    if (theme.length > 100) {
+      return res.status(400).json({ error: 'ธีมห้องต้องไม่เกิน 100 ตัวอักษร' });
     }
   }
   try {
@@ -283,10 +344,11 @@ router.patch('/rooms/:id', async (req, res, next) => {
          price_per_hour = COALESCE($4, price_per_hour),
          image_url = COALESCE($5, image_url),
          is_active = COALESCE($6, is_active),
-         description = COALESCE($7, description)
-       WHERE room_id = $8
+         description = COALESCE($7, description),
+         theme = COALESCE($8, theme)
+       WHERE room_id = $9
        RETURNING *`,
-      [roomName, size, capacity, pricePerHour, imageUrl, isActive, description, req.params.id]
+      [roomName, size, capacity, pricePerHour, imageUrl, isActive, description, theme, req.params.id]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'ไม่พบห้อง' });
     res.json(result.rows[0]);
@@ -297,15 +359,15 @@ router.patch('/rooms/:id', async (req, res, next) => {
 
 // POST /api/admin/rooms -- เพิ่มห้องใหม่ (ปุ่ม + ในหน้า "ตั้งค่าห้อง")
 router.post('/rooms', async (req, res, next) => {
-  const { roomName, size, capacity, pricePerHour, imageUrl, description } = req.body;
+  const { roomName, size, capacity, pricePerHour, imageUrl, description, theme } = req.body;
   try {
     const shop = (await pool.query('SELECT shop_id FROM shop ORDER BY shop_id LIMIT 1')).rows[0];
     const roomCode = 'R-' + Date.now();
     const result = await pool.query(
-      `INSERT INTO room (shop_id, room_code, room_name, size, capacity, price_per_hour, image_url, description)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      `INSERT INTO room (shop_id, room_code, room_name, size, capacity, price_per_hour, image_url, description, theme)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING *`,
-      [shop?.shop_id || null, roomCode, roomName || 'ห้องใหม่', size || 'S', capacity || null, pricePerHour || 0, imageUrl || null, description || null]
+      [shop?.shop_id || null, roomCode, roomName || 'ห้องใหม่', size || 'S', capacity || null, pricePerHour || 0, imageUrl || null, description || null, theme || null]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -331,22 +393,29 @@ router.delete('/rooms/:id', async (req, res, next) => {
  * รายงาน (หน้า "รายงาน" รายวัน/รายสัปดาห์/รายเดือน)
  * ========================================================== */
 
+// ช่วงข้อมูลของแต่ละ period — ต้องตรงกับ RANGE_LABEL ในหน้ารายงานฝั่ง frontend (AdminReportsPage)
+const REPORT_RANGE_START = {
+  day: `CURRENT_DATE - 6`,                                             // 7 วันล่าสุด (รวมวันนี้)
+  week: `date_trunc('week', CURRENT_DATE)::date - 21`,                 // 4 สัปดาห์ล่าสุด (รวมสัปดาห์นี้)
+  month: `(date_trunc('month', CURRENT_DATE) - interval '5 months')::date`, // 6 เดือนล่าสุด (รวมเดือนนี้)
+};
+
 // GET /api/admin/reports?period=day|week|month
 router.get('/reports', async (req, res, next) => {
-  const period = req.query.period || 'day';
-  const trunc = period === 'month' ? 'month' : period === 'week' ? 'week' : 'day';
+  const period = ['day', 'week', 'month'].includes(req.query.period) ? req.query.period : 'day';
+  const inRange = `booking_status IN ('confirmed','completed') AND booking_date >= ${REPORT_RANGE_START[period]}`;
   try {
     const trend = await pool.query(
       `SELECT date_trunc($1, booking_date::timestamp) AS period, SUM(price_total) AS revenue, COUNT(*) AS bookings
        FROM booking
-       WHERE booking_status IN ('confirmed','completed')
+       WHERE ${inRange}
        GROUP BY 1 ORDER BY 1`,
-      [trunc]
+      [period]
     );
     const byRoom = await pool.query(`
       SELECT r.room_name, SUM(b.price_total) AS revenue, COUNT(*) AS bookings
       FROM booking b JOIN room r ON r.room_id = b.room_id
-      WHERE b.booking_status IN ('confirmed','completed')
+      WHERE ${inRange}
       GROUP BY r.room_name
       ORDER BY revenue DESC`);
     const totals = await pool.query(`
@@ -354,7 +423,7 @@ router.get('/reports', async (req, res, next) => {
              COUNT(*) AS total_bookings,
              COALESCE(ROUND(AVG(price_total),2),0) AS avg_ticket
       FROM booking
-      WHERE booking_status IN ('confirmed','completed')`);
+      WHERE ${inRange}`);
     res.json({ period, trend: trend.rows, byRoom: byRoom.rows, totals: totals.rows[0] });
   } catch (err) {
     next(err);
