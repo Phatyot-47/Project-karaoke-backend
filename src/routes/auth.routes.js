@@ -17,7 +17,8 @@ router.use(authLimiter);
 // POST /api/auth/register  { name, phone }  -- สมัครสมาชิกลูกค้า
 router.post('/register', async (req, res, next) => {
   const { name, phone } = req.body;
-  if (!name || !phone || phone.trim().length < 9) {
+  // เช็คชนิดก่อนเรียก .trim() — ถ้าส่งเบอร์มาเป็นตัวเลข .trim() จะ throw นอก try ทำให้ process ล่มทั้งตัว
+  if (typeof name !== 'string' || !name.trim() || typeof phone !== 'string' || phone.trim().length < 9) {
     return res.status(400).json({ error: 'กรุณากรอกชื่อและเบอร์โทรศัพท์ให้ครบถ้วน' });
   }
   try {
@@ -39,7 +40,7 @@ router.post('/register', async (req, res, next) => {
 // POST /api/auth/login  { phone }  -- ลูกค้าเข้าสู่ระบบด้วยเบอร์โทร
 router.post('/login', async (req, res, next) => {
   const { phone } = req.body;
-  if (!phone || phone.trim().length < 9) {
+  if (typeof phone !== 'string' || phone.trim().length < 9) {
     return res.status(400).json({ error: 'กรุณากรอกเบอร์โทรศัพท์ให้ถูกต้อง' });
   }
   try {

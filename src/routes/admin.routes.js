@@ -364,7 +364,8 @@ router.get('/bookings/history', async (req, res, next) => {
     await expireStalePendingBookings();
     const result = await pool.query(`
       SELECT b.*, r.room_name, r.image_url, COALESCE(u.name, b.walkin_name) AS customer_name,
-        p.payment_id, p.evidence_url, p.payment_status
+        p.payment_id, p.evidence_url, p.payment_status,
+        s.session_status, s.checkin_time, s.checkout_time
       FROM booking b
       JOIN room r ON r.room_id = b.room_id
       LEFT JOIN users u ON u.user_id = b.customer_id
@@ -372,6 +373,7 @@ router.get('/bookings/history', async (req, res, next) => {
         SELECT * FROM payment WHERE payment.booking_id = b.booking_id
         ORDER BY payment_id DESC LIMIT 1
       ) p ON true
+      LEFT JOIN service_session s ON s.booking_id = b.booking_id
       ORDER BY b.created_at DESC`);
     res.json(result.rows);
   } catch (err) {
