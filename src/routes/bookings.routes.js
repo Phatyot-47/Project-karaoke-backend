@@ -3,6 +3,7 @@ const pool = require('../db');
 const { calculateBookingPrice } = require('../utils/pricing');
 const { expireStalePendingBookings } = require('../utils/expireBookings');
 const { isStartInPast } = require('../utils/time');
+const { makeCode } = require('../utils/codes');
 
 const NOTE_MAX_LENGTH = 300;
 
@@ -46,7 +47,7 @@ router.post('/', async (req, res) => {
     });
     const depositRequired = Math.round((priceTotal * Number(policy.deposit_percent)) / 100);
     const bookingDate = startDatetime.slice(0, 10);
-    const bookingCode = 'BK-' + Date.now();
+    const bookingCode = makeCode('BK');
 
     const insertResult = await pool.query(
       `INSERT INTO booking (
@@ -85,6 +86,24 @@ router.get('/customer/:customerId', async (req, res, next) => {
       [req.params.customerId]
     );
     res.json(result.rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/bookings/:id -- รายการจองเดียว (หน้าชำระมัดจำโหลดใหม่ได้เมื่อรีเฟรช / กดชำระต่อจากหน้าประวัติ)
+router.get('/:id', async (req, res, next) => {
+  if (!/^\d+$/.test(req.params.id)) return res.status(400).json({ error: 'รหัสการจองไม่ถูกต้อง' });
+  try {
+    await expireStalePendingBookings();
+    const result = await pool.query(
+      `SELECT b.*, r.room_name, r.image_url, r.size, r.capacity
+       FROM booking b JOIN room r ON r.room_id = b.room_id
+       WHERE b.booking_id = $1`,
+      [req.params.id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'ไม่พบรายการจอง' });
+    res.json(result.rows[0]);
   } catch (err) {
     next(err);
   }
