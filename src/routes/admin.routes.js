@@ -3,6 +3,7 @@ const pool = require('../db');
 const { calculateBookingPrice } = require('../utils/pricing');
 const { expireStalePendingBookings } = require('../utils/expireBookings');
 const { isStartInPast } = require('../utils/time');
+const { makeCode } = require('../utils/codes');
 
 /* ============================================================
  * อนุมัติการจอง (หน้า "อนุมัติการจอง")
@@ -17,14 +18,18 @@ router.get('/bookings/today', async (req, res, next) => {
         COUNT(*) FILTER (WHERE booking_status = 'pending')   AS pending_count,
         COUNT(*) FILTER (WHERE booking_status = 'confirmed') AS in_progress_count,
         COUNT(*) FILTER (WHERE booking_status = 'completed') AS completed_count,
-        COALESCE(SUM(price_total) FILTER (WHERE booking_status IN ('confirmed','completed')), 0) AS revenue_today
+        COALESCE(SUM(price_total) FILTER (WHERE booking_status IN ('confirmed','completed')), 0) AS revenue_today,
+        (SELECT COUNT(*) FROM booking o
+         WHERE o.booking_date < CURRENT_DATE AND o.booking_status IN ('pending','confirmed')
+           AND NOT EXISTS (SELECT 1 FROM service_session ss WHERE ss.booking_id = o.booking_id)) AS overdue_count
       FROM booking
       WHERE booking_date = CURRENT_DATE`);
     const list = await pool.query(`
       SELECT b.*, r.room_name, r.image_url, COALESCE(u.name, b.walkin_name) AS customer_name,
         p.payment_id, p.evidence_url, p.payment_status,
         s.session_id, s.checkin_time, s.checkout_time, s.session_status, s.overtime_amount,
-        COALESCE(x.extend_minutes, 0) AS extended_minutes, COALESCE(x.extra_amount, 0) AS extension_amount
+        COALESCE(x.extend_minutes, 0) AS extended_minutes, COALESCE(x.extra_amount, 0) AS extension_amount,
+        (b.booking_date < CURRENT_DATE AND s.session_id IS NULL) AS is_overdue
       FROM booking b
       JOIN room r ON r.room_id = b.room_id
       LEFT JOIN users u ON u.user_id = b.customer_id
@@ -38,40 +43,44 @@ router.get('/bookings/today', async (req, res, next) => {
         FROM extension WHERE extension.session_id = s.session_id
       ) x ON true
       -- รอบที่ยังไม่ Check-out ให้แสดงต่อแม้เลยเที่ยงคืนไปแล้ว (เช่น ช่วง 23:30-00:00 ที่ออกช้า)
+      -- และรายการที่ค้างจากวันก่อน (สลิปยังไม่ได้ตรวจ / ยืนยันแล้วแต่ไม่มา Check-in) ให้แอดมินจัดการต่อ ขึ้นก่อนเสมอ
       WHERE b.booking_date = CURRENT_DATE OR s.session_status = 'in_progress'
-      ORDER BY b.start_datetime`);
+         OR (b.booking_date < CURRENT_DATE AND b.booking_status IN ('pending','confirmed') AND s.session_id IS NULL)
+      ORDER BY is_overdue DESC, b.start_datetime`);
     res.json({ stats: stats.rows[0], bookings: list.rows });
   } catch (err) {
     next(err);
   }
 });
 
-// PATCH /api/admin/bookings/:id/confirm -- กดปุ่ม "ยืนยัน"
+// PATCH /api/admin/bookings/:id/confirm -- กดปุ่ม "ยืนยัน" (ยืนยันรายการที่เลยเวลาสิ้นสุดไปแล้วไม่ได้)
 router.patch('/bookings/:id/confirm', async (req, res, next) => {
   try {
     const result = await pool.query(
       `UPDATE booking SET booking_status = 'confirmed', updated_at = now()
-       WHERE booking_id = $1 AND booking_status = 'pending'
+       WHERE booking_id = $1 AND booking_status = 'pending' AND end_datetime > LOCALTIMESTAMP
        RETURNING *`,
       [req.params.id]
     );
-    if (!result.rows.length) return res.status(404).json({ error: 'ไม่พบรายการ หรือสถานะไม่ใช่ pending' });
+    if (!result.rows.length) return res.status(404).json({ error: 'ไม่พบรายการ สถานะไม่ใช่ pending หรือเลยเวลาของการจองนี้แล้ว' });
     res.json(result.rows[0]);
   } catch (err) {
     next(err);
   }
 });
 
-// PATCH /api/admin/bookings/:id/reject  { reason } -- กดปุ่ม "ปฏิเสธ" / "ยืนยันยกเลิก"
+// PATCH /api/admin/bookings/:id/reject  { reason } -- กดปุ่ม "ปฏิเสธ" (pending) / "ยกเลิกการจอง" (confirmed)
+// ยกเลิกได้ทั้งรายการที่รอยืนยันและที่ยืนยันแล้ว แต่ต้องยังไม่ Check-in (มีรอบใช้บริการแล้วให้ Check-out แทน)
 router.patch('/bookings/:id/reject', async (req, res, next) => {
   try {
     const result = await pool.query(
       `UPDATE booking SET booking_status = 'cancelled', cancel_reason = $2, updated_at = now()
-       WHERE booking_id = $1 AND booking_status = 'pending'
+       WHERE booking_id = $1 AND booking_status IN ('pending','confirmed')
+         AND NOT EXISTS (SELECT 1 FROM service_session s WHERE s.booking_id = booking.booking_id)
        RETURNING *`,
       [req.params.id, req.body.reason || 'ไม่ระบุเหตุ']
     );
-    if (!result.rows.length) return res.status(404).json({ error: 'ไม่พบรายการ' });
+    if (!result.rows.length) return res.status(404).json({ error: 'ไม่พบรายการ หรือรายการนี้ยกเลิกไม่ได้แล้ว (Check-in แล้ว)' });
     res.json(result.rows[0]);
   } catch (err) {
     next(err);
@@ -337,7 +346,7 @@ router.post('/bookings/walkin', async (req, res, next) => {
     });
     const depositRequired = Math.round((priceTotal * Number(policy.deposit_percent)) / 100);
     const bookingDate = startDatetime.slice(0, 10);
-    const bookingCode = 'BK-' + Date.now();
+    const bookingCode = makeCode('BK');
 
     const result = await pool.query(
       `INSERT INTO booking (
@@ -451,7 +460,16 @@ router.get('/shop', async (req, res, next) => {
 
 // PATCH /api/admin/shop
 router.patch('/shop', async (req, res, next) => {
-  const { name, taxId, phone, address, bankName, bankAccountNo, bankAccountName, qrCodeUrl, peakStartTime, peakSurcharge, floorPlanUrl } = req.body;
+  const { name, taxId, phone, address, bankName, bankAccountNo, bankAccountName, qrCodeUrl, peakStartTime, floorPlanUrl } = req.body;
+  // ตรวจค่าพีคไทม์ก่อน — เดิมถ้าลบช่องจนว่าง ส่ง '' ไปให้ DB แปลงเป็น time/numeric ไม่ได้ กลายเป็น 500
+  if (peakStartTime != null && !(typeof peakStartTime === 'string' && /^([01]?\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(peakStartTime))) {
+    return res.status(400).json({ error: 'เวลาเริ่มพีคไทม์ต้องเป็นรูปแบบ HH:MM เช่น 18:00' });
+  }
+  // ช่องค่าบริการเพิ่มว่าง = ไม่คิดค่าพีค (0)
+  const peakSurcharge = req.body.peakSurcharge === '' ? 0 : req.body.peakSurcharge;
+  if (peakSurcharge != null && !(Number.isFinite(Number(peakSurcharge)) && Number(peakSurcharge) >= 0)) {
+    return res.status(400).json({ error: 'ค่าบริการเพิ่มช่วงพีคต้องเป็นตัวเลขตั้งแต่ 0 ขึ้นไป' });
+  }
   try {
     const result = await pool.query(
       `UPDATE shop SET
@@ -565,7 +583,7 @@ router.post('/rooms', async (req, res, next) => {
   const { roomName, size, capacity, pricePerHour, imageUrl, description, theme } = req.body;
   try {
     const shop = (await pool.query('SELECT shop_id FROM shop ORDER BY shop_id LIMIT 1')).rows[0];
-    const roomCode = 'R-' + Date.now();
+    const roomCode = makeCode('R');
     const result = await pool.query(
       `INSERT INTO room (shop_id, room_code, room_name, size, capacity, price_per_hour, image_url, description, theme)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
