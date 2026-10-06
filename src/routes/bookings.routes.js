@@ -76,8 +76,10 @@ router.get('/customer/:customerId', async (req, res, next) => {
   try {
     await expireStalePendingBookings();
     const result = await pool.query(
-      `SELECT b.*, r.room_name, r.image_url, r.capacity
+      `SELECT b.*, r.room_name, r.image_url, r.capacity,
+              s.session_status, s.checkin_time, s.checkout_time
        FROM booking b JOIN room r ON r.room_id = b.room_id
+       LEFT JOIN service_session s ON s.booking_id = b.booking_id
        WHERE b.customer_id = $1
        ORDER BY b.created_at DESC`,
       [req.params.customerId]
