@@ -28,7 +28,7 @@ router.post('/register', async (req, res, next) => {
     }
     const result = await pool.query(
       `INSERT INTO users (name, phone, role) VALUES ($1, $2, 'customer')
-       RETURNING user_id, name, phone`,
+       RETURNING user_id, name, phone, avatar_url`,
       [name.trim(), phone.trim()]
     );
     res.status(201).json(result.rows[0]);
@@ -45,7 +45,7 @@ router.post('/login', async (req, res, next) => {
   }
   try {
     const result = await pool.query(
-      `SELECT user_id, name, phone FROM users WHERE phone = $1 AND role = 'customer'`,
+      `SELECT user_id, name, phone, avatar_url FROM users WHERE phone = $1 AND role = 'customer'`,
       [phone.trim()]
     );
     if (!result.rows.length) {
