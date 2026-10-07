@@ -46,7 +46,8 @@ router.get('/bookings/today', async (req, res, next) => {
       -- และรายการที่ค้างจากวันก่อน (สลิปยังไม่ได้ตรวจ / ยืนยันแล้วแต่ไม่มา Check-in) ให้แอดมินจัดการต่อ ขึ้นก่อนเสมอ
       WHERE b.booking_date = CURRENT_DATE OR s.session_status = 'in_progress'
          OR (b.booking_date < CURRENT_DATE AND b.booking_status IN ('pending','confirmed') AND s.session_id IS NULL)
-      ORDER BY is_overdue DESC, b.start_datetime`);
+      -- ในแต่ละกลุ่ม (ค้างจากวันก่อน / วันนี้) เรียงตามเวลาที่ลูกค้ากดจอง ใหม่สุดขึ้นก่อน
+      ORDER BY is_overdue DESC, b.created_at DESC, b.booking_id DESC`);
     res.json({ stats: stats.rows[0], bookings: list.rows });
   } catch (err) {
     next(err);
