@@ -45,7 +45,7 @@ router.get('/:id/availability', route(async (req, res) => {
   if (!date) throw new HttpError(400, 'ต้องระบุ date (YYYY-MM-DD)');
   await expireStalePendingBookings();
   const result = await pool.query(
-    `SELECT start_datetime, end_datetime, booking_status
+    `SELECT booking_id, start_datetime, end_datetime, booking_status
      FROM booking
      WHERE room_id = $1 AND booking_date = $2 AND booking_status IN ('pending','confirmed')
      ORDER BY start_datetime`,

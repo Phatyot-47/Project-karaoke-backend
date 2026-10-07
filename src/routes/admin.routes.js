@@ -1,11 +1,12 @@
 const router = require('express').Router();
 const { pool, withTransaction } = require('../db');
 const { HttpError, route } = require('../utils/http');
-const { getShop } = require('../utils/shop');
+const { getShop, getCurrentPolicy } = require('../utils/shop');
 const { priceRange, quoteBooking } = require('../utils/quoteBooking');
 const { expireStalePendingBookings } = require('../utils/expireBookings');
 const { isStartInPast } = require('../utils/time');
 const { makeCode } = require('../utils/codes');
+const { submittedDepositSql } = require('../utils/deposit');
 
 /* ============================================================
  * อนุมัติการจอง (หน้า "อนุมัติการจอง") + ประวัติการจอง
@@ -15,7 +16,10 @@ const { makeCode } = require('../utils/codes');
 const BOOKING_LIST_COLUMNS = `
   b.*, r.room_name, r.image_url, COALESCE(u.name, b.walkin_name) AS customer_name,
   p.payment_id, p.evidence_url, p.payment_status,
-  s.session_id, s.checkin_time, s.checkout_time, s.session_status, s.overtime_amount`;
+  s.session_id, s.checkin_time, s.checkout_time, s.session_status, s.overtime_amount,
+  ${submittedDepositSql('b')} AS paid_amount,
+  (SELECT json_agg(evidence_url ORDER BY payment_id) FROM payment
+   WHERE payment.booking_id = b.booking_id AND payment_status IN ('pending','paid') AND evidence_url IS NOT NULL) AS slip_urls`;
 const BOOKING_LIST_JOINS = `
   FROM booking b
   JOIN room r ON r.room_id = b.room_id
@@ -26,6 +30,10 @@ const BOOKING_LIST_JOINS = `
   ) p ON true
   LEFT JOIN service_session s ON s.booking_id = b.booking_id`;
 
+// รายได้ของ booking: ใช้บริการ/ยืนยันแล้ว = ยอดรวม, ไม่มาใช้บริการ (no-show) = มัดจำที่ร้านเก็บไว้ (ไม่คืน)
+const REVENUE_STATUSES = `('confirmed','completed','no_show')`;
+const REVENUE_SQL = `CASE WHEN booking_status = 'no_show' THEN deposit_required ELSE price_total END`;
+
 // GET /api/admin/bookings/today -- การ์ดสรุป + รายการจองวันนี้
 router.get('/bookings/today', route(async (req, res) => {
   await expireStalePendingBookings();
@@ -34,7 +42,7 @@ router.get('/bookings/today', route(async (req, res) => {
       COUNT(*) FILTER (WHERE booking_status = 'pending')   AS pending_count,
       COUNT(*) FILTER (WHERE booking_status = 'confirmed') AS in_progress_count,
       COUNT(*) FILTER (WHERE booking_status = 'completed') AS completed_count,
-      COALESCE(SUM(price_total) FILTER (WHERE booking_status IN ('confirmed','completed')), 0) AS revenue_today,
+      COALESCE(SUM(${REVENUE_SQL}) FILTER (WHERE booking_status IN ${REVENUE_STATUSES}), 0) AS revenue_today,
       (SELECT COUNT(*) FROM booking o
        WHERE o.booking_date < CURRENT_DATE AND o.booking_status IN ('pending','confirmed')
          AND NOT EXISTS (SELECT 1 FROM service_session ss WHERE ss.booking_id = o.booking_id)) AS overdue_count
@@ -87,6 +95,20 @@ router.patch('/bookings/:id/reject', route(async (req, res) => {
     [req.params.id, req.body.reason || 'ไม่ระบุเหตุ']
   )).rows[0];
   if (!booking) throw new HttpError(404, 'ไม่พบรายการ หรือรายการนี้ยกเลิกไม่ได้แล้ว (Check-in แล้ว)');
+  res.json(booking);
+}));
+
+// PATCH /api/admin/bookings/:id/no-show -- กดปุ่ม "ไม่มาใช้บริการ" (ขอบเขตข้อ 2.3)
+// ได้เฉพาะรายการที่ยืนยันแล้ว เลยเวลาเริ่มแล้ว และยังไม่ Check-in — ปล่อยช่วงเวลาคืน มัดจำไม่คืนตามนโยบาย
+router.patch('/bookings/:id/no-show', route(async (req, res) => {
+  const booking = (await pool.query(
+    `UPDATE booking SET booking_status = 'no_show', cancel_reason = $2, updated_at = now()
+     WHERE booking_id = $1 AND booking_status = 'confirmed' AND start_datetime <= LOCALTIMESTAMP
+       AND NOT EXISTS (SELECT 1 FROM service_session s WHERE s.booking_id = booking.booking_id)
+     RETURNING *`,
+    [req.params.id, (typeof req.body.reason === 'string' && req.body.reason.trim()) || 'ลูกค้าไม่มาใช้บริการตามเวลาที่จอง']
+  )).rows[0];
+  if (!booking) throw new HttpError(409, 'บันทึกไม่มาใช้บริการได้เฉพาะรายการที่ยืนยันแล้ว เลยเวลาเริ่มแล้ว และยังไม่ Check-in');
   res.json(booking);
 }));
 
@@ -298,7 +320,21 @@ router.patch('/payments/:id/verify', route(async (req, res) => {
     )).rows[0];
     if (!verified) throw new HttpError(404, 'ไม่พบรายการชำระเงิน หรือสลิปนี้ตรวจไปแล้ว');
     if (status === 'paid') {
-      await client.query(`UPDATE booking SET deposit_status = 'paid', updated_at = now() WHERE booking_id = $1`, [verified.booking_id]);
+      // อนุมัติ = รับมัดจำของ booking นี้ทั้งหมด: สลิปอื่นที่ยังรอตรวจ (เช่น สลิปแรกก่อนลูกค้าแก้ไขการจอง) ผ่านไปพร้อมกัน
+      await client.query(
+        `UPDATE payment SET payment_status = 'paid', verified_by = $2, verified_at = now()
+         WHERE booking_id = $1 AND payment_status = 'pending'`,
+        [verified.booking_id, adminUserId || null]
+      );
+      // ตรวจผ่านครบยอดมัดจำแล้ว = paid / ยังมีสลิปอื่นรอตรวจ = pending_verify / ยังจ่ายไม่ครบ (แก้ไขการจองแล้วต้องจ่ายเพิ่ม) = unpaid
+      await client.query(
+        `UPDATE booking SET updated_at = now(), deposit_status = CASE
+           WHEN (SELECT COALESCE(SUM(amount), 0) FROM payment WHERE booking_id = $1 AND payment_status = 'paid') >= deposit_required THEN 'paid'
+           WHEN EXISTS (SELECT 1 FROM payment WHERE booking_id = $1 AND payment_status = 'pending') THEN 'pending_verify'
+           ELSE 'unpaid' END
+         WHERE booking_id = $1`,
+        [verified.booking_id]
+      );
     } else {
       await client.query(
         `UPDATE booking SET deposit_status = 'unpaid',
@@ -323,7 +359,7 @@ router.get('/shop', route(async (req, res) => {
   const shop = await getShop();
   if (!shop) throw new HttpError(404, 'ยังไม่ได้ตั้งค่าร้าน');
   const hours = await pool.query('SELECT * FROM shop_hours ORDER BY day_of_week');
-  res.json({ ...shop, hours: hours.rows });
+  res.json({ ...shop, hours: hours.rows, policy: await getCurrentPolicy() });
 }));
 
 // PATCH /api/admin/shop
@@ -358,6 +394,41 @@ router.patch('/shop', route(async (req, res) => {
   )).rows[0];
   if (!shop) throw new HttpError(404, 'ยังไม่ได้ตั้งค่าร้าน');
   res.json(shop);
+}));
+
+// จำนวนชั่วโมงในนโยบาย: จำนวนเต็ม 0-72 / allowBlank = ช่องว่างได้ (null)
+function policyHours(value, label, allowBlank = false) {
+  if (allowBlank && (value === '' || value === null || value === undefined)) return null;
+  const n = Number(value);
+  if (value === '' || value === null || !Number.isInteger(n) || n < 0 || n > 72) {
+    throw new HttpError(400, `${label}ต้องเป็นจำนวนเต็ม 0-72 ชั่วโมง`);
+  }
+  return n;
+}
+
+// PATCH /api/admin/policy  { depositPercent, cancelHoursBefore, allowEditBeforeHours, refundPolicyDesc, noShowPolicyDesc, adminUserId }
+// -- ตั้งค่านโยบายมัดจำ/ยกเลิก/แก้ไข/No-show (ขอบเขตข้อ 2.3)
+// บันทึกเป็นนโยบายฉบับใหม่ (ปิดฉบับเดิมด้วย effective_to) — การจองที่ทำไปแล้วยังใช้นโยบายตอนที่จอง (booking.policy_id)
+router.patch('/policy', route(async (req, res) => {
+  const b = req.body;
+  const depositPercent = Number(b.depositPercent);
+  if (b.depositPercent === '' || !Number.isFinite(depositPercent) || depositPercent < 0 || depositPercent > 100) {
+    throw new HttpError(400, 'เปอร์เซ็นต์มัดจำต้องเป็นตัวเลข 0-100');
+  }
+  const cancelHours = policyHours(b.cancelHoursBefore, 'ยกเลิกล่วงหน้า');
+  const editHours = policyHours(b.allowEditBeforeHours, 'แก้ไขล่วงหน้า', true);
+  const text = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 500) : null);
+  const policy = await withTransaction(async (client) => {
+    await client.query('UPDATE shop_policy SET effective_to = now() WHERE effective_to IS NULL');
+    return (await client.query(
+      `INSERT INTO shop_policy (deposit_percent, cancel_hours_before, allow_edit_before_hours,
+         refund_policy_desc, no_show_policy_desc, effective_from, updated_by)
+       VALUES ($1, $2, $3, $4, $5, now(), $6)
+       RETURNING *`,
+      [depositPercent, cancelHours, editHours, text(b.refundPolicyDesc), text(b.noShowPolicyDesc), b.adminUserId || null]
+    )).rows[0];
+  });
+  res.json(policy);
 }));
 
 // PATCH /api/admin/shop/hours   { hours: [{ dayOfWeek, openHour, closeHour }, ...] }
@@ -453,23 +524,23 @@ const REPORT_RANGE_START = {
 // GET /api/admin/reports?period=day|week|month
 router.get('/reports', route(async (req, res) => {
   const period = ['day', 'week', 'month'].includes(req.query.period) ? req.query.period : 'day';
-  const inRange = `booking_status IN ('confirmed','completed') AND booking_date >= ${REPORT_RANGE_START[period]}`;
+  const inRange = `booking_status IN ${REVENUE_STATUSES} AND booking_date >= ${REPORT_RANGE_START[period]}`;
   const trend = await pool.query(
-    `SELECT date_trunc($1, booking_date::timestamp) AS period, SUM(price_total) AS revenue, COUNT(*) AS bookings
+    `SELECT date_trunc($1, booking_date::timestamp) AS period, SUM(${REVENUE_SQL}) AS revenue, COUNT(*) AS bookings
      FROM booking WHERE ${inRange}
      GROUP BY 1 ORDER BY 1`,
     [period]
   );
   const byRoom = await pool.query(`
-    SELECT r.room_name, SUM(b.price_total) AS revenue, COUNT(*) AS bookings
+    SELECT r.room_name, SUM(${REVENUE_SQL}) AS revenue, COUNT(*) AS bookings
     FROM booking b JOIN room r ON r.room_id = b.room_id
     WHERE ${inRange}
     GROUP BY r.room_name
     ORDER BY revenue DESC`);
   const totals = await pool.query(`
-    SELECT COALESCE(SUM(price_total),0) AS total_revenue,
+    SELECT COALESCE(SUM(${REVENUE_SQL}),0) AS total_revenue,
            COUNT(*) AS total_bookings,
-           COALESCE(ROUND(AVG(price_total),2),0) AS avg_ticket
+           COALESCE(ROUND(AVG(${REVENUE_SQL}),2),0) AS avg_ticket
     FROM booking WHERE ${inRange}`);
   res.json({ period, trend: trend.rows, byRoom: byRoom.rows, totals: totals.rows[0] });
 }));
