@@ -1,12 +1,16 @@
 const router = require('express').Router();
 const { pool, withTransaction } = require('../db');
 const { HttpError, route } = require('../utils/http');
-const { getShop, getCurrentPolicy } = require('../utils/shop');
+const { getShop } = require('../utils/shop');
 const { priceRange, quoteBooking } = require('../utils/quoteBooking');
 const { expireStalePendingBookings } = require('../utils/expireBookings');
 const { isStartInPast } = require('../utils/time');
 const { makeCode } = require('../utils/codes');
 const { submittedDepositSql } = require('../utils/deposit');
+const { requireAdmin } = require('../utils/auth');
+
+// ทุก route ในไฟล์นี้ต้องล็อกอินเป็นแอดมิน — ผู้ทำรายการ (checked_in_by, verified_by ฯลฯ) = แอดมินเจ้าของ token
+router.use(requireAdmin);
 
 /* ============================================================
  * อนุมัติการจอง (หน้า "อนุมัติการจอง") + ประวัติการจอง
@@ -150,7 +154,7 @@ const WALKIN_MIN_MINUTES = 60; // วอล์คอินจองขั้น�
 
 // POST /api/admin/bookings/walkin -- ฟอร์ม "เพิ่มรายการจองวอล์คอิน"
 router.post('/bookings/walkin', route(async (req, res) => {
-  const { roomId, startDatetime, endDatetime, customerName, customerPhone, adminUserId } = req.body;
+  const { roomId, startDatetime, endDatetime, customerName, customerPhone } = req.body;
   if (!roomId || !startDatetime || !endDatetime) {
     throw new HttpError(400, 'ข้อมูลไม่ครบ (roomId, startDatetime, endDatetime)');
   }
@@ -171,7 +175,7 @@ router.post('/bookings/walkin', route(async (req, res) => {
        booking_status, base_price, peak_surcharge_total, price_total, deposit_required, deposit_status
      ) VALUES ($1,$2,$3,$4,'admin_walkin',$5,$6,$7,$8,$9,'confirmed',$10,$11,$12,$13,'paid')
      RETURNING *`,
-    [q.bookingCode, adminUserId || null, roomId, q.policyId, q.bookingDate, startDatetime, endDatetime,
+    [q.bookingCode, req.user.id, roomId, q.policyId, q.bookingDate, startDatetime, endDatetime,
       customerName || 'ลูกค้าหน้าร้าน', customerPhone || null, q.basePrice, q.peakSurchargeTotal, q.priceTotal, q.depositRequired]
   )).rows[0];
   res.status(201).json(booking);
@@ -220,7 +224,7 @@ async function lockActiveSession(client, bookingId, message) {
   return b;
 }
 
-// PATCH /api/admin/bookings/:id/check-in  { adminUserId }
+// PATCH /api/admin/bookings/:id/check-in
 router.patch('/bookings/:id/check-in', route(async (req, res) => {
   const session = await withTransaction(async (client) => {
     const b = await lockBookingWithSession(client, req.params.id);
@@ -233,13 +237,13 @@ router.patch('/bookings/:id/check-in', route(async (req, res) => {
       `INSERT INTO service_session (booking_id, checkin_time, checked_in_by, session_status)
        VALUES ($1, LOCALTIMESTAMP, $2, 'in_progress')
        RETURNING *`,
-      [b.booking_id, req.body.adminUserId || null]
+      [b.booking_id, req.user.id]
     )).rows[0];
   });
   res.status(201).json(session);
 }));
 
-// PATCH /api/admin/bookings/:id/extend  { minutes, adminUserId } -- ต่อเวลาทีละ 30 นาที ราคาเดียวกับตอนจอง
+// PATCH /api/admin/bookings/:id/extend  { minutes } -- ต่อเวลาทีละ 30 นาที ราคาเดียวกับตอนจอง
 // เลื่อน booking.end_datetime ออกไปจริง ห้องชนกับการจองถัดไปหรือไม่ให้ exclusion constraint (23P01) ตัดสิน
 // และต่อได้ไม่เกินเวลาปิดร้านของวันนั้น (shop_hours.close_hour)
 router.patch('/bookings/:id/extend', route(async (req, res) => {
@@ -267,13 +271,13 @@ router.patch('/bookings/:id/extend', route(async (req, res) => {
       `INSERT INTO extension (session_id, extend_minutes, new_end_datetime, extra_amount, approved_by, created_at)
        VALUES ($1, $2, $3, $4, $5, LOCALTIMESTAMP)
        RETURNING *`,
-      [b.session_id, minutes, newEnd, extraAmount, req.body.adminUserId || null]
+      [b.session_id, minutes, newEnd, extraAmount, req.user.id]
     )).rows[0];
   });
   res.status(201).json(extension);
 }, { '23P01': [409, 'ต่อเวลาไม่ได้ เพราะห้องนี้มีการจองถัดไปในช่วงเวลานั้นแล้ว'] }));
 
-// PATCH /api/admin/bookings/:id/check-out  { adminUserId }
+// PATCH /api/admin/bookings/:id/check-out
 // ออกช้ากว่าเวลาสิ้นสุด คิดค่าเกินเวลาตาม overtimeHalfSlots() ด้วยราคาเดียวกับตอนจอง แล้วปิดงาน booking เป็น completed
 router.patch('/bookings/:id/check-out', route(async (req, res) => {
   const result = await withTransaction(async (client) => {
@@ -287,7 +291,7 @@ router.patch('/bookings/:id/check-out', route(async (req, res) => {
          session_status = 'finished', overtime_amount = $3
        WHERE session_id = $1
        RETURNING *`,
-      [b.session_id, req.body.adminUserId || null, overtimeAmount]
+      [b.session_id, req.user.id, overtimeAmount]
     )).rows[0];
     await client.query(
       `UPDATE booking SET booking_status = 'completed', price_total = price_total + $2, updated_at = now()
@@ -303,11 +307,11 @@ router.patch('/bookings/:id/check-out', route(async (req, res) => {
  * ตรวจสอบสลิปการชำระเงิน
  * ========================================================== */
 
-// PATCH /api/admin/payments/:id/verify  { adminUserId, approve, reason }
+// PATCH /api/admin/payments/:id/verify  { approve, reason }
 // อนุมัติ = มัดจำ paid / ปฏิเสธ = ยกเลิกการจองทันทีพร้อมเหตุผลให้ลูกค้าเห็น และปล่อยช่วงเวลาคืน
 // ตรวจได้เฉพาะสลิปที่ยังรอตรวจ กันการกดซ้ำเปลี่ยนผลที่ตัดสินไปแล้ว
 router.patch('/payments/:id/verify', route(async (req, res) => {
-  const { adminUserId, approve } = req.body;
+  const { approve } = req.body;
   const reason = (typeof req.body.reason === 'string' && req.body.reason.trim()) || 'สลิปไม่ผ่านการตรวจสอบ';
   const status = approve === false ? 'rejected' : 'paid';
   const payment = await withTransaction(async (client) => {
@@ -316,7 +320,7 @@ router.patch('/payments/:id/verify', route(async (req, res) => {
          remark = CASE WHEN $2::varchar = 'rejected' THEN $4::text ELSE remark END
        WHERE payment_id = $1 AND payment_status = 'pending'
        RETURNING *`,
-      [req.params.id, status, adminUserId || null, reason]
+      [req.params.id, status, req.user.id, reason]
     )).rows[0];
     if (!verified) throw new HttpError(404, 'ไม่พบรายการชำระเงิน หรือสลิปนี้ตรวจไปแล้ว');
     if (status === 'paid') {
@@ -324,7 +328,7 @@ router.patch('/payments/:id/verify', route(async (req, res) => {
       await client.query(
         `UPDATE payment SET payment_status = 'paid', verified_by = $2, verified_at = now()
          WHERE booking_id = $1 AND payment_status = 'pending'`,
-        [verified.booking_id, adminUserId || null]
+        [verified.booking_id, req.user.id]
       );
       // ตรวจผ่านครบยอดมัดจำแล้ว = paid / ยังมีสลิปอื่นรอตรวจ = pending_verify / ยังจ่ายไม่ครบ (แก้ไขการจองแล้วต้องจ่ายเพิ่ม) = unpaid
       await client.query(
@@ -353,14 +357,6 @@ router.patch('/payments/:id/verify', route(async (req, res) => {
 /* ============================================================
  * ตั้งค่าร้าน (หน้า "ตั้งค่าร้าน")
  * ========================================================== */
-
-// GET /api/admin/shop
-router.get('/shop', route(async (req, res) => {
-  const shop = await getShop();
-  if (!shop) throw new HttpError(404, 'ยังไม่ได้ตั้งค่าร้าน');
-  const hours = await pool.query('SELECT * FROM shop_hours ORDER BY day_of_week');
-  res.json({ ...shop, hours: hours.rows, policy: await getCurrentPolicy() });
-}));
 
 // PATCH /api/admin/shop
 router.patch('/shop', route(async (req, res) => {
@@ -406,7 +402,7 @@ function policyHours(value, label, allowBlank = false) {
   return n;
 }
 
-// PATCH /api/admin/policy  { depositPercent, cancelHoursBefore, allowEditBeforeHours, refundPolicyDesc, noShowPolicyDesc, adminUserId }
+// PATCH /api/admin/policy  { depositPercent, cancelHoursBefore, allowEditBeforeHours, refundPolicyDesc, noShowPolicyDesc }
 // -- ตั้งค่านโยบายมัดจำ/ยกเลิก/แก้ไข/No-show (ขอบเขตข้อ 2.3)
 // บันทึกเป็นนโยบายฉบับใหม่ (ปิดฉบับเดิมด้วย effective_to) — การจองที่ทำไปแล้วยังใช้นโยบายตอนที่จอง (booking.policy_id)
 router.patch('/policy', route(async (req, res) => {
@@ -425,7 +421,7 @@ router.patch('/policy', route(async (req, res) => {
          refund_policy_desc, no_show_policy_desc, effective_from, updated_by)
        VALUES ($1, $2, $3, $4, $5, now(), $6)
        RETURNING *`,
-      [depositPercent, cancelHours, editHours, text(b.refundPolicyDesc), text(b.noShowPolicyDesc), b.adminUserId || null]
+      [depositPercent, cancelHours, editHours, text(b.refundPolicyDesc), text(b.noShowPolicyDesc), req.user.id]
     )).rows[0];
   });
   res.json(policy);

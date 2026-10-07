@@ -5,23 +5,19 @@ const { quoteBooking } = require('../utils/quoteBooking');
 const { expireStalePendingBookings } = require('../utils/expireBookings');
 const { isStartInPast } = require('../utils/time');
 const { submittedDepositSql } = require('../utils/deposit');
+const { requireCustomer, requireLogin } = require('../utils/auth');
 
 const NOTE_MAX_LENGTH = 300;
 
-// POST /api/bookings  { customerId, roomId, startDatetime, endDatetime, guestCount, note }
-// -- ลูกค้ายืนยันช่วงเวลาจอง (ก่อนไปหน้าชำระมัดจำ)
-router.post('/', route(async (req, res) => {
-  const { customerId, roomId, startDatetime, endDatetime, guestCount } = req.body;
+// POST /api/bookings  { roomId, startDatetime, endDatetime, guestCount, note }
+// -- ลูกค้ายืนยันช่วงเวลาจอง (ก่อนไปหน้าชำระมัดจำ) — ผู้จอง = ลูกค้าเจ้าของ token เสมอ
+router.post('/', requireCustomer, route(async (req, res) => {
+  const { roomId, startDatetime, endDatetime, guestCount } = req.body;
   if (!roomId || !startDatetime || !endDatetime) {
     throw new HttpError(400, 'ข้อมูลไม่ครบ (roomId, startDatetime, endDatetime)');
   }
   const note = typeof req.body.note === 'string' ? req.body.note.trim() : '';
   if (note.length > NOTE_MAX_LENGTH) throw new HttpError(400, `หมายเหตุต้องไม่เกิน ${NOTE_MAX_LENGTH} ตัวอักษร`);
-  // endpoint นี้ใช้เฉพาะ flow ลูกค้า login แล้วจอง (ไม่มี walkin_name ให้ fallback แบบฝั่งแอดมิน)
-  // ต้องมี customerId เป็นเลขจำนวนเต็มบวกเสมอ ไม่งั้นจะไปชน CHECK/FK constraint ที่ DB แล้วหลุดเป็น 500
-  if (!Number.isInteger(Number(customerId)) || Number(customerId) <= 0) {
-    throw new HttpError(400, 'ต้องระบุ customerId ที่ถูกต้อง กรุณาเข้าสู่ระบบใหม่');
-  }
   if (isStartInPast(startDatetime)) throw new HttpError(400, 'เวลาที่เลือกผ่านไปแล้ว กรุณาเลือกเวลาอื่น');
 
   await expireStalePendingBookings();
@@ -36,7 +32,7 @@ router.post('/', route(async (req, res) => {
        base_price, peak_surcharge_total, price_total, deposit_required, deposit_status, note
      ) VALUES ($1,$2,$3,$4,'customer_online',$5,$6,$7,$8,'pending',$9,$10,$11,$12,'unpaid',$13)
      RETURNING *`,
-    [q.bookingCode, Number(customerId), roomId, q.policyId, q.bookingDate, startDatetime, endDatetime,
+    [q.bookingCode, req.user.id, roomId, q.policyId, q.bookingDate, startDatetime, endDatetime,
       guestCount || null, q.basePrice, q.peakSurchargeTotal, q.priceTotal, q.depositRequired, note || null]
   )).rows[0];
   res.status(201).json(booking);
@@ -45,8 +41,9 @@ router.post('/', route(async (req, res) => {
   '23503': [404, 'ไม่พบบัญชีผู้ใช้นี้ กรุณาเข้าสู่ระบบใหม่'],
 }));
 
-// GET /api/bookings/customer/:customerId -- หน้า "ประวัติการจอง" ของลูกค้า
-router.get('/customer/:customerId', route(async (req, res) => {
+// GET /api/bookings/customer/:customerId -- หน้า "ประวัติการจอง" ของลูกค้า (ดูได้เฉพาะของตัวเอง)
+router.get('/customer/:customerId', requireCustomer, route(async (req, res) => {
+  if (Number(req.params.customerId) !== req.user.id) throw new HttpError(403, 'ดูได้เฉพาะประวัติของตัวเอง');
   await expireStalePendingBookings();
   const result = await pool.query(
     `SELECT b.*, r.room_name, r.image_url, r.capacity,
@@ -62,7 +59,8 @@ router.get('/customer/:customerId', route(async (req, res) => {
 }));
 
 // GET /api/bookings/:id -- รายการจองเดียว (หน้าชำระมัดจำโหลดใหม่ได้เมื่อรีเฟรช / กดชำระต่อจากหน้าประวัติ)
-router.get('/:id', route(async (req, res) => {
+// ลูกค้าดูได้เฉพาะการจองของตัวเอง (ของคนอื่นตอบเหมือนไม่มีรายการ) / แอดมินดูได้ทุกรายการ
+router.get('/:id', requireLogin, route(async (req, res) => {
   if (!/^\d+$/.test(req.params.id)) throw new HttpError(400, 'รหัสการจองไม่ถูกต้อง');
   await expireStalePendingBookings();
   const booking = (await pool.query(
@@ -74,21 +72,23 @@ router.get('/:id', route(async (req, res) => {
      WHERE b.booking_id = $1`,
     [req.params.id]
   )).rows[0];
-  if (!booking) throw new HttpError(404, 'ไม่พบรายการจอง');
+  if (!booking || (req.user.role === 'customer' && booking.customer_id !== req.user.id)) {
+    throw new HttpError(404, 'ไม่พบรายการจอง');
+  }
   res.json(booking);
 }));
 
 const hhmm = (datetime) => String(datetime).slice(11, 16);
 const baht = (n) => Number(n).toLocaleString('th-TH');
 
-// PATCH /api/bookings/:id/edit  { customerId, roomId, startDatetime, endDatetime }
+// PATCH /api/bookings/:id/edit  { roomId, startDatetime, endDatetime }
 // -- ลูกค้าเปลี่ยนห้อง/เวลาของการจองที่ส่งสลิปมัดจำแล้ว (ภายในวันเดิม ยังไม่ Check-in)
 // แก้ได้ล่วงหน้าอย่างน้อย shop_policy.allow_edit_before_hours ชม. ก่อนเวลาเริ่มเดิม (ว่าง = ใช้ cancel_hours_before)
 // มัดจำ: ใช้ยอดที่จ่ายแล้วเป็นฐาน ถ้ามัดจำของห้อง/เวลาใหม่สูงกว่า ต้องจ่ายส่วนต่าง (การจองกลับเป็น pending
 // ให้แอดมินตรวจสลิปส่วนต่างและยืนยันใหม่) ถ้าต่ำกว่าไม่คืนเงิน (มัดจำไม่คืนทุกกรณี)
 // บันทึกสิ่งที่เปลี่ยนต่อท้าย booking.note ให้แอดมินเห็น
-router.patch('/:id/edit', route(async (req, res) => {
-  const { customerId, roomId, startDatetime, endDatetime } = req.body;
+router.patch('/:id/edit', requireCustomer, route(async (req, res) => {
+  const { roomId, startDatetime, endDatetime } = req.body;
   if (!roomId || !startDatetime || !endDatetime) {
     throw new HttpError(400, 'ข้อมูลไม่ครบ (roomId, startDatetime, endDatetime)');
   }
@@ -109,7 +109,7 @@ router.patch('/:id/edit', route(async (req, res) => {
        FOR UPDATE OF b`,
       [req.params.id]
     )).rows[0];
-    if (!old || old.customer_id !== Number(customerId) || !['pending', 'confirmed'].includes(old.booking_status) || old.checked_in) {
+    if (!old || old.customer_id !== req.user.id || !['pending', 'confirmed'].includes(old.booking_status) || old.checked_in) {
       throw new HttpError(404, 'ไม่พบรายการ หรือรายการนี้แก้ไขไม่ได้แล้ว');
     }
     if (Number(old.paid_amount) <= 0) {
@@ -155,10 +155,10 @@ router.patch('/:id/edit', route(async (req, res) => {
 // PATCH /api/bookings/:id/cancel  { reason } -- ลูกค้ายกเลิกการจองของตัวเอง
 // ยกเลิกได้เฉพาะก่อนเวลาเริ่มอย่างน้อย shop_policy.cancel_hours_before ชั่วโมง (ใช้นโยบายที่ผูกกับ booking นั้น
 // ถ้าไม่มีให้ใช้นโยบายล่าสุด) — เทียบกับ LOCALTIMESTAMP ของ DB ซึ่งตั้ง timezone เป็น Asia/Bangkok ไว้แล้ว
-router.patch('/:id/cancel', route(async (req, res) => {
+router.patch('/:id/cancel', requireCustomer, route(async (req, res) => {
   const booking = await withTransaction(async (client) => {
     const found = (await client.query(
-      `SELECT b.booking_status,
+      `SELECT b.booking_status, b.customer_id,
               COALESCE(p.cancel_hours_before, latest.cancel_hours_before, 0) AS cancel_hours_before,
               b.start_datetime > LOCALTIMESTAMP
                 + make_interval(hours => COALESCE(p.cancel_hours_before, latest.cancel_hours_before, 0)) AS within_window
@@ -171,7 +171,7 @@ router.patch('/:id/cancel', route(async (req, res) => {
        FOR UPDATE OF b`,
       [req.params.id]
     )).rows[0];
-    if (!found || !['pending', 'confirmed'].includes(found.booking_status)) {
+    if (!found || found.customer_id !== req.user.id || !['pending', 'confirmed'].includes(found.booking_status)) {
       throw new HttpError(404, 'ไม่พบรายการ หรือยกเลิกไม่ได้แล้ว');
     }
     if (!found.within_window) {

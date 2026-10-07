@@ -3,9 +3,11 @@
  * แล้ว error handler กลางใน app.js จะตอบ { error: message } ด้วย status นั้นให้เอง
  */
 class HttpError extends Error {
-  constructor(status, message) {
+  // code (ไม่บังคับ): รหัสให้ frontend แยกกรณีได้ เช่น 'PASSWORD_NOT_SET'
+  constructor(status, message, code) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
