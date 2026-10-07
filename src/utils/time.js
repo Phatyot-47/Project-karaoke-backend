@@ -37,4 +37,4 @@ function isStartInPast(startDatetime) {
   return startMinutesOfDay + PAST_SLOT_GRACE_MINUTES <= now.minutesOfDay;
 }
 
-module.exports = { PAST_SLOT_GRACE_MINUTES, bangkokNowParts, isStartInPast };
+module.exports = { NAIVE_DATETIME_RE, isStartInPast };

@@ -1,4 +1,4 @@
-const pool = require('../db');
+const { pool } = require('../db');
 
 const HOLD_MINUTES = 5; // ต้องตรงกับ countdown ของ QR ฝั่ง frontend (PaymentPage)
 
@@ -21,4 +21,4 @@ async function expireStalePendingBookings() {
   `);
 }
 
-module.exports = { expireStalePendingBookings, HOLD_MINUTES };
+module.exports = { expireStalePendingBookings };

@@ -1,6 +1,7 @@
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
+const { HttpError } = require('./utils/http');
 
 const authRoutes = require('./routes/auth.routes');
 const roomsRoutes = require('./routes/rooms.routes');
@@ -31,10 +32,13 @@ app.use((req, res) => {
   res.status(404).json({ error: 'ไม่พบ endpoint นี้' });
 });
 
+// error handler กลาง: HttpError ตอบตาม status ของมัน / JSON body ผิดรูปแบบตอบ 400 / อื่นๆ log แล้วตอบ 500
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
+  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+  if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'ข้อมูลที่ส่งมาไม่ใช่ JSON ที่ถูกต้อง' });
   console.error(err);
-  res.status(500).json({ error: 'Internal server error' });
+  res.status(500).json({ error: 'เกิดข้อผิดพลาดในระบบ กรุณาลองใหม่อีกครั้ง' });
 });
 
 module.exports = app;

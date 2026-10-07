@@ -9,7 +9,7 @@ function calculateBookingPrice({ pricePerHour, peakStartTime, peakSurcharge, sta
   const totalMinutes = (end - start) / 60000;
 
   if (!Number.isFinite(totalMinutes) || totalMinutes <= 0) {
-    throw new Error('end_datetime ต้องอยู่หลัง start_datetime');
+    throw new Error('เวลาสิ้นสุดต้องอยู่หลังเวลาเริ่ม');
   }
   if (totalMinutes % 30 !== 0) {
     throw new Error('ช่วงเวลาต้องเป็นทวีคูณของ 30 นาที');
