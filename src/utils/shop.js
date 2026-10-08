@@ -7,7 +7,9 @@ async function getShop(db = pool) {
 
 // นโยบายมัดจำ/ยกเลิกที่มีผลล่าสุด
 async function getCurrentPolicy(db = pool) {
-  return (await db.query('SELECT * FROM shop_policy ORDER BY effective_from DESC, policy_id DESC LIMIT 1')).rows[0] || null;
+  return (
+    (await db.query('SELECT * FROM shop_policy ORDER BY effective_from DESC, policy_id DESC LIMIT 1')).rows[0] || null
+  );
 }
 
 module.exports = { getShop, getCurrentPolicy };
