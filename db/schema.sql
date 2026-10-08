@@ -1,5 +1,5 @@
 -- ============================================================
--- schema.sql — โครงสร้างฐานข้อมูลตั้งต้นของระบบ Gens Karaoke (9 ตาราง)
+-- schema.sql — โครงสร้างฐานข้อมูลตั้งต้นของระบบ Gens Karaoke (10 ตาราง)
 -- ============================================================
 -- ใช้ตอนตั้งค่าเครื่องใหม่ / เพื่อนในกลุ่ม clone โปรเจคไปรัน (ไฟล์นี้รวมทุก migration ใน db/migrations แล้ว
 -- ไม่ต้องรัน migrations ซ้ำ) — export จาก DB ที่ใช้พัฒนาจริงด้วย pg_dump --schema-only
@@ -208,7 +208,6 @@ CREATE TABLE public.room (
     shop_id integer,
     room_code character varying(20),
     room_name character varying(100) NOT NULL,
-    size character varying(10) NOT NULL,
     capacity integer,
     price_per_hour numeric(10,2) DEFAULT 0 NOT NULL,
     room_status character varying(20) DEFAULT 'available'::character varying,
@@ -216,7 +215,7 @@ CREATE TABLE public.room (
     is_active boolean DEFAULT true NOT NULL,
     description text,
     theme character varying(100),
-    CONSTRAINT room_size_check CHECK (((size)::text = ANY ((ARRAY['S'::character varying, 'M'::character varying, 'L'::character varying, 'XL'::character varying])::text[]))),
+    type_id integer NOT NULL,
     CONSTRAINT room_status_check CHECK (((room_status)::text = 'available'::text))
 );
 
@@ -239,6 +238,44 @@ CREATE SEQUENCE public.room_room_id_seq
 --
 
 ALTER SEQUENCE public.room_room_id_seq OWNED BY public.room.room_id;
+
+
+--
+-- Name: room_type; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.room_type (
+    type_id integer NOT NULL,
+    code character varying(10) NOT NULL,
+    name character varying(100) NOT NULL,
+    capacity_min integer NOT NULL,
+    capacity_max integer NOT NULL,
+    base_price_per_hour numeric(10,2) DEFAULT 0 NOT NULL,
+    description text,
+    CONSTRAINT room_type_capacity_min_check CHECK ((capacity_min >= 1)),
+    CONSTRAINT room_type_capacity_range_check CHECK ((capacity_max >= capacity_min)),
+    CONSTRAINT room_type_price_check CHECK ((base_price_per_hour >= (0)::numeric))
+);
+
+
+--
+-- Name: room_type_type_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.room_type_type_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: room_type_type_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.room_type_type_id_seq OWNED BY public.room_type.type_id;
 
 
 --
@@ -462,6 +499,13 @@ ALTER TABLE ONLY public.room ALTER COLUMN room_id SET DEFAULT nextval('public.ro
 
 
 --
+-- Name: room_type type_id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.room_type ALTER COLUMN type_id SET DEFAULT nextval('public.room_type_type_id_seq'::regclass);
+
+
+--
 -- Name: service_session session_id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -550,6 +594,22 @@ ALTER TABLE ONLY public.room
 
 ALTER TABLE ONLY public.room
     ADD CONSTRAINT room_room_code_key UNIQUE (room_code);
+
+
+--
+-- Name: room_type room_type_code_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.room_type
+    ADD CONSTRAINT room_type_code_key UNIQUE (code);
+
+
+--
+-- Name: room_type room_type_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.room_type
+    ADD CONSTRAINT room_type_pkey PRIMARY KEY (type_id);
 
 
 --
@@ -715,6 +775,14 @@ ALTER TABLE ONLY public.payment
 
 ALTER TABLE ONLY public.room
     ADD CONSTRAINT room_shop_id_fkey FOREIGN KEY (shop_id) REFERENCES public.shop(shop_id);
+
+
+--
+-- Name: room room_type_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.room
+    ADD CONSTRAINT room_type_id_fkey FOREIGN KEY (type_id) REFERENCES public.room_type(type_id);
 
 
 --
