@@ -1,3 +1,4 @@
+// สร้างรหัสอ้างอิงที่ไม่ซ้ำกัน (รหัสการจอง / รหัสห้อง)
 const crypto = require('crypto');
 
 /**
@@ -6,7 +7,10 @@ const crypto = require('crypto');
  * constraint กลายเป็น 500 — ต่อท้ายด้วยสุ่ม 4 ตัว (base36) กันชน ความยาวรวมไม่เกิน varchar(20) ของ room_code
  */
 function makeCode(prefix) {
-  const random = crypto.randomInt(36 ** 4).toString(36).padStart(4, '0');
+  const random = crypto
+    .randomInt(36 ** 4)
+    .toString(36)
+    .padStart(4, '0');
   return `${prefix}-${Date.now()}-${random}`;
 }
 
