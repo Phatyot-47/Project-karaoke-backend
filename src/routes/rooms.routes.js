@@ -42,7 +42,7 @@ router.get('/:id', route(async (req, res) => {
 // GET /api/rooms/:id/availability?date=YYYY-MM-DD -- ช่วงเวลาที่ถูกจองแล้ว (หน้าเลือกเวลา)
 router.get('/:id/availability', route(async (req, res) => {
   const { date } = req.query;
-  if (!date) throw new HttpError(400, 'ต้องระบุ date (YYYY-MM-DD)');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) throw new HttpError(400, 'ต้องระบุ date (YYYY-MM-DD)');
   await expireStalePendingBookings();
   const result = await pool.query(
     `SELECT booking_id, start_datetime, end_datetime, booking_status
