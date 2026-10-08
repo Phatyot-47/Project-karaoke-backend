@@ -5,8 +5,10 @@ const { pool } = require('../db');
 const { HttpError, route } = require('../utils/http');
 const { NAIVE_DATETIME_RE } = require('../utils/time');
 const { expireStalePendingBookings } = require('../utils/expireBookings');
+const { ROOM_TYPE_COLUMNS, joinRoomType } = require('../utils/roomType');
 
 // GET /api/rooms?size=S&start=YYYY-MM-DDTHH:MM:SS&end=...  -- หน้า "เลือกห้องคาราโอเกะ"
+// size = รหัสประเภทห้อง (room_type.code) ไม่ส่ง/all = ทุกประเภท
 // ถ้าส่ง start/end มาด้วย จะมีฟิลด์ is_available บอกว่าห้องว่างตลอดช่วงเวลานั้นหรือไม่ (ค้นหาห้องว่างตามเวลา/ระยะเวลา)
 router.get(
   '/',
@@ -23,17 +25,20 @@ router.get(
       params.push(start, end);
       availabilitySql = `, NOT EXISTS (
         SELECT 1 FROM booking b
-        WHERE b.room_id = room.room_id AND b.booking_status IN ('pending','confirmed')
+        WHERE b.room_id = r.room_id AND b.booking_status IN ('pending','confirmed')
           AND b.start_datetime < $2 AND b.end_datetime > $1
       ) AS is_available`;
     }
-    let sql = `SELECT room_id, room_name, size, capacity, price_per_hour, image_url, is_active, description, theme${availabilitySql}
-             FROM room WHERE is_active = true`;
+    let sql = `SELECT r.room_id, r.room_name, r.type_id, r.capacity, r.price_per_hour, r.image_url, r.is_active,
+                      r.description, r.theme, ${ROOM_TYPE_COLUMNS}${availabilitySql}
+               FROM room r ${joinRoomType('r')}
+               WHERE r.is_active = true`;
     if (size && size !== 'all') {
       params.push(String(size).toUpperCase());
-      sql += ` AND size = $${params.length}`;
+      sql += ` AND t.code = $${params.length}`;
     }
-    res.json((await pool.query(`${sql} ORDER BY price_per_hour`, params)).rows);
+    // เรียงตามประเภท (เล็ก → ใหญ่) แล้วตามราคา
+    res.json((await pool.query(`${sql} ORDER BY t.capacity_min, t.code, r.price_per_hour, r.room_name`, params)).rows);
   }),
 );
 
@@ -41,7 +46,11 @@ router.get(
 router.get(
   '/:id',
   route(async (req, res) => {
-    const room = (await pool.query('SELECT * FROM room WHERE room_id = $1', [req.params.id])).rows[0];
+    const room = (
+      await pool.query(`SELECT r.*, ${ROOM_TYPE_COLUMNS} FROM room r ${joinRoomType('r')} WHERE r.room_id = $1`, [
+        req.params.id,
+      ])
+    ).rows[0];
     if (!room) throw new HttpError(404, 'ไม่พบห้อง');
     res.json(room);
   }),

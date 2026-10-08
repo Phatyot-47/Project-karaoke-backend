@@ -13,6 +13,7 @@ const adminRoutes = require('./routes/admin.routes');
 const uploadsRoutes = require('./routes/uploads.routes');
 const usersRoutes = require('./routes/users.routes');
 const shopRoutes = require('./routes/shop.routes');
+const roomTypesRoutes = require('./routes/roomTypes.routes');
 
 const app = express();
 app.use(cors());
@@ -40,6 +41,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/uploads', uploadsRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/shop', shopRoutes);
+app.use('/api/room-types', roomTypesRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'ไม่พบ endpoint นี้' });

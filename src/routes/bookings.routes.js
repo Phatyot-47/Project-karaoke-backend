@@ -7,6 +7,7 @@ const { expireStalePendingBookings } = require('../utils/expireBookings');
 const { isStartInPast } = require('../utils/time');
 const { submittedDepositSql } = require('../utils/deposit');
 const { requireCustomer, requireLogin } = require('../utils/auth');
+const { ROOM_TYPE_COLUMNS, joinRoomType } = require('../utils/roomType');
 
 const NOTE_MAX_LENGTH = 300;
 
@@ -72,10 +73,10 @@ router.get(
     if (Number(req.params.customerId) !== req.user.id) throw new HttpError(403, 'ดูได้เฉพาะประวัติของตัวเอง');
     await expireStalePendingBookings();
     const result = await pool.query(
-      `SELECT b.*, r.room_name, r.image_url, r.size, r.capacity,
+      `SELECT b.*, r.room_name, r.image_url, r.capacity, ${ROOM_TYPE_COLUMNS},
             s.session_status, s.checkin_time, s.checkout_time,
             ${submittedDepositSql('b')} AS paid_amount
-     FROM booking b JOIN room r ON r.room_id = b.room_id
+     FROM booking b JOIN room r ON r.room_id = b.room_id ${joinRoomType('r')}
      LEFT JOIN service_session s ON s.booking_id = b.booking_id
      WHERE b.customer_id = $1
      ORDER BY b.created_at DESC`,
@@ -95,10 +96,10 @@ router.get(
     await expireStalePendingBookings();
     const booking = (
       await pool.query(
-        `SELECT b.*, r.room_name, r.image_url, r.size, r.capacity,
+        `SELECT b.*, r.room_name, r.image_url, r.capacity, ${ROOM_TYPE_COLUMNS},
             ${submittedDepositSql('b')} AS paid_amount,
             COALESCE(p.deposit_percent, (SELECT deposit_percent FROM shop_policy ORDER BY effective_from DESC, policy_id DESC LIMIT 1)) AS deposit_percent
-     FROM booking b JOIN room r ON r.room_id = b.room_id
+     FROM booking b JOIN room r ON r.room_id = b.room_id ${joinRoomType('r')}
      LEFT JOIN shop_policy p ON p.policy_id = b.policy_id
      WHERE b.booking_id = $1`,
         [req.params.id],
