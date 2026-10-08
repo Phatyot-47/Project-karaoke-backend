@@ -159,6 +159,7 @@ router.patch('/:id/cancel', requireCustomer, route(async (req, res) => {
   const booking = await withTransaction(async (client) => {
     const found = (await client.query(
       `SELECT b.booking_status, b.customer_id,
+              EXISTS (SELECT 1 FROM service_session s WHERE s.booking_id = b.booking_id) AS checked_in,
               COALESCE(p.cancel_hours_before, latest.cancel_hours_before, 0) AS cancel_hours_before,
               b.start_datetime > LOCALTIMESTAMP
                 + make_interval(hours => COALESCE(p.cancel_hours_before, latest.cancel_hours_before, 0)) AS within_window
@@ -174,6 +175,8 @@ router.patch('/:id/cancel', requireCustomer, route(async (req, res) => {
     if (!found || found.customer_id !== req.user.id || !['pending', 'confirmed'].includes(found.booking_status)) {
       throw new HttpError(404, 'ไม่พบรายการ หรือยกเลิกไม่ได้แล้ว');
     }
+    // Check-in ไปแล้ว (เข้าห้องแล้ว) ยกเลิกเองไม่ได้ — กรณี Check-in ก่อนเวลาเริ่ม 15 นาทีจะยังอยู่ในช่วงยกเลิกได้
+    if (found.checked_in) throw new HttpError(409, 'รายการนี้ Check-in แล้ว ยกเลิกไม่ได้ กรุณาติดต่อร้าน');
     if (!found.within_window) {
       throw new HttpError(409, `ยกเลิกได้ล่วงหน้าก่อนเวลาเริ่มอย่างน้อย ${found.cancel_hours_before} ชั่วโมงเท่านั้น กรุณาติดต่อร้าน`);
     }
