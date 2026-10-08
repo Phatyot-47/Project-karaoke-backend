@@ -46,7 +46,7 @@ router.get('/customer/:customerId', requireCustomer, route(async (req, res) => {
   if (Number(req.params.customerId) !== req.user.id) throw new HttpError(403, 'ดูได้เฉพาะประวัติของตัวเอง');
   await expireStalePendingBookings();
   const result = await pool.query(
-    `SELECT b.*, r.room_name, r.image_url, r.capacity,
+    `SELECT b.*, r.room_name, r.image_url, r.size, r.capacity,
             s.session_status, s.checkin_time, s.checkout_time,
             ${submittedDepositSql('b')} AS paid_amount
      FROM booking b JOIN room r ON r.room_id = b.room_id
