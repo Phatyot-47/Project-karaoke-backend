@@ -164,8 +164,9 @@ router.post('/bookings/walkin', route(async (req, res) => {
   if (isStartInPast(startDatetime)) throw new HttpError(400, 'เวลาที่เลือกผ่านไปแล้ว กรุณาเลือกเวลาอื่น');
 
   await expireStalePendingBookings();
-  const room = (await pool.query('SELECT * FROM room WHERE room_id = $1', [roomId])).rows[0];
-  if (!room) throw new HttpError(404, 'ไม่พบห้อง');
+  // ห้องที่ปิดให้บริการอยู่ (is_active = false) ห้ามจองวอล์คอิน เหมือนฝั่งลูกค้า
+  const room = (await pool.query('SELECT * FROM room WHERE room_id = $1 AND is_active = true', [roomId])).rows[0];
+  if (!room) throw new HttpError(404, 'ไม่พบห้อง หรือห้องปิดให้บริการ');
   const q = await quoteBooking(room, startDatetime, endDatetime);
 
   const booking = (await pool.query(
