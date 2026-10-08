@@ -1,3 +1,5 @@
+// API ข้อมูลห้อง (/api/rooms/...) — รายการห้อง, ค้นหาห้องว่างตามเวลา, ช่วงเวลาที่ถูกจองแล้ว
+// (ไม่ต้องล็อกอินก็ดูได้)
 const router = require('express').Router();
 const { pool } = require('../db');
 const { HttpError, route } = require('../utils/http');

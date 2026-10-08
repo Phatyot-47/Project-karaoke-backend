@@ -1,3 +1,4 @@
+// เชื่อมต่อ PostgreSQL ด้วย connection pool + ฟังก์ชันช่วยรันคำสั่งหลายอันใน transaction เดียว
 require('dotenv').config();
 const { Pool, types } = require('pg');
 

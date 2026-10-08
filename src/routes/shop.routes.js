@@ -1,3 +1,4 @@
+// API ข้อมูลร้านแบบสาธารณะ (/api/shop)
 const router = require('express').Router();
 const { pool } = require('../db');
 const { HttpError, route } = require('../utils/http');

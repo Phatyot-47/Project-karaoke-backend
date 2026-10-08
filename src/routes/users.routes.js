@@ -1,3 +1,4 @@
+// API ข้อมูลส่วนตัวลูกค้า (/api/users/...) — แก้ชื่อ/เบอร์/รูปโปรไฟล์ และเปลี่ยนรหัสผ่าน
 const router = require('express').Router();
 const { pool } = require('../db');
 const { HttpError, route } = require('../utils/http');

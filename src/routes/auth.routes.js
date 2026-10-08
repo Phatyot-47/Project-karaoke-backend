@@ -1,3 +1,4 @@
+// API เข้าสู่ระบบ (/api/auth/...) — สมัครสมาชิก/ล็อกอินลูกค้า, ตั้งรหัสผ่านครั้งแรก, ล็อกอินแอดมิน
 const router = require('express').Router();
 const rateLimit = require('express-rate-limit');
 const { pool } = require('../db');

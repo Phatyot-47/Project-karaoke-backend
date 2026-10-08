@@ -1,3 +1,4 @@
+// ยกเลิกการจองอัตโนมัติ ถ้าลูกค้าไม่แนบสลิปภายในเวลาที่กำหนด
 const { pool } = require('../db');
 
 const HOLD_MINUTES = 5; // ต้องตรงกับ countdown ของ QR ฝั่ง frontend (PaymentPage)

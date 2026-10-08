@@ -1,3 +1,5 @@
+// ตั้งค่า Express app: middleware, เส้นทาง API ทั้งหมด (/api/...) และตัวจัดการ error กลาง
+// (แยกจาก server.js เพื่อให้เอาไปใช้ทดสอบได้โดยไม่ต้องเปิดพอร์ตจริง)
 const path = require('path');
 const express = require('express');
 const cors = require('cors');

@@ -1,3 +1,4 @@
+// คำนวณราคา + มัดจำของการจอง (ใช้ร่วมกันทั้งลูกค้าจองออนไลน์และแอดมินจองวอล์คอิน)
 const { pool } = require('../db');
 const { calculateBookingPrice } = require('./pricing');
 const { getShop, getCurrentPolicy } = require('./shop');

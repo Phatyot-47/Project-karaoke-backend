@@ -1,3 +1,4 @@
+// ฟังก์ชันเกี่ยวกับเวลาไทย (UTC+7) — ใช้เช็คว่าเวลาที่จองผ่านไปแล้วหรือยัง
 const BANGKOK_OFFSET_MS = 7 * 60 * 60 * 1000;
 const PAST_SLOT_GRACE_MINUTES = 15;
 

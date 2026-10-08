@@ -1,3 +1,4 @@
+// ระบบ token (JWT) — สร้าง token ตอนล็อกอิน และ middleware ตรวจสิทธิ์ลูกค้า/แอดมิน
 require('dotenv').config();
 const jwt = require('jsonwebtoken');
 const { HttpError } = require('./http');

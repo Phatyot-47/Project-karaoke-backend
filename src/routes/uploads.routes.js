@@ -1,3 +1,4 @@
+// API อัปโหลดรูป (/api/uploads) — สลิป รูปห้อง รูปโปรไฟล์ เก็บไว้ในโฟลเดอร์ uploads/
 const router = require('express').Router();
 const multer = require('multer');
 const path = require('path');

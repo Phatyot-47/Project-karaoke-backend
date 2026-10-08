@@ -1,3 +1,4 @@
+// API การชำระเงิน (/api/payments) — ลูกค้าแนบสลิปโอนมัดจำ รอแอดมินตรวจ
 const router = require('express').Router();
 const { withTransaction } = require('../db');
 const { HttpError, route } = require('../utils/http');

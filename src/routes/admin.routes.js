@@ -1,3 +1,5 @@
+// API ฝั่งแอดมิน (/api/admin/...) — อนุมัติการจอง, วอล์คอิน, Check-in/out, ต่อเวลา, ตรวจสลิป,
+// ตั้งค่าร้าน/ห้อง และรายงานรายได้
 const router = require('express').Router();
 const { pool, withTransaction } = require('../db');
 const { HttpError, route } = require('../utils/http');

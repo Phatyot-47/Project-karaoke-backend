@@ -1,3 +1,4 @@
+// API การจองฝั่งลูกค้า (/api/bookings/...) — จองห้อง, ดูประวัติ, แก้ไข และยกเลิกการจอง
 const router = require('express').Router();
 const { pool, withTransaction } = require('../db');
 const { HttpError, route } = require('../utils/http');

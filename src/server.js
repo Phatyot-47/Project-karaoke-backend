@@ -1,3 +1,4 @@
+// จุดเริ่มรัน backend — เปิด server ตาม PORT ใน .env และตั้งเวลาเคลียร์การจองที่ค้างชำระทุก 1 นาที
 require('dotenv').config();
 const app = require('./app');
 const { expireStalePendingBookings } = require('./utils/expireBookings');
