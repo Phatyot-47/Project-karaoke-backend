@@ -1,7 +1,7 @@
 # Gens Karaoke Backend API
 
 Backend สำหรับระบบจองห้องคาราโอเกะ Gens Karaoke & Board Game (Node.js + Express + PostgreSQL)
-ฐานข้อมูลมี 10 ตาราง: users, shop, shop_hours, shop_policy, room_type, room, booking, payment, service_session, extension
+ฐานข้อมูลมี 11 ตาราง: users, shop, shop_hours, shop_policy, room_type, room, booking, payment, service_session, extension, notification
 
 ## ติดตั้ง
 
@@ -69,6 +69,13 @@ npm run format  # จัดรูปแบบโค้ดด้วย Prettier
 - 👤🛠 `POST /api/uploads` (multipart field `file` รูป JPG/PNG/GIF/WEBP ไม่เกิน 5MB)
 - 👤 `PATCH /api/users/:id` `{ name, phone, avatarUrl }`
 - 👤 `PATCH /api/users/:id/password` `{ currentPassword, newPassword }`
+
+### แจ้งเตือนของลูกค้า (กระดิ่งบนเมนูลูกค้า)
+
+- 👤 `GET /api/notifications` → `{ unreadCount, items }` (ล่าสุด 30 รายการ)
+- 👤 `PATCH /api/notifications/:id/read` · `PATCH /api/notifications/read-all`
+
+แจ้งเตือนสร้างอัตโนมัติเมื่อร้านยืนยัน / ยกเลิก / ปฏิเสธสลิป / ย้ายห้อง / บันทึกไม่มาใช้บริการ และเมื่อระบบยกเลิกเพราะหมดเวลาชำระมัดจำ (`src/utils/notify.js`)
 
 ### แอดมิน
 
