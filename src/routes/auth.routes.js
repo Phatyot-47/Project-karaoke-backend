@@ -7,10 +7,12 @@ const { signToken } = require('../utils/auth');
 const { normalizePhone, checkName, checkPassword } = require('../utils/validate');
 
 // จำกัดจำนวนครั้ง login/register ต่อ IP กัน brute-force เดารหัสผ่าน
+// นับเฉพาะครั้งที่ไม่สำเร็จ — ลูกค้าหลายคนใช้ wifi ร้านเดียวกัน (IP เดียวกัน) ล็อกอินถูกต้องได้ไม่จำกัด
 router.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 10,
+    skipSuccessfulRequests: true,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'พยายามเข้าสู่ระบบบ่อยเกินไป กรุณาลองใหม่ภายหลัง' },
