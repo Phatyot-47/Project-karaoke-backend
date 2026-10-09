@@ -10,6 +10,7 @@ const { isStartInPast } = require('../utils/time');
 const { makeCode } = require('../utils/codes');
 const { submittedDepositSql } = require('../utils/deposit');
 const { requireAdmin } = require('../utils/auth');
+const { ROOM_TYPE_COLUMNS, joinRoomType } = require('../utils/roomType');
 
 // ทุก route ในไฟล์นี้ต้องล็อกอินเป็นแอดมิน — ผู้ทำรายการ (checked_in_by, verified_by ฯลฯ) = แอดมินเจ้าของ token
 router.use(requireAdmin);
@@ -586,7 +587,7 @@ router.patch(
 );
 
 /* ============================================================
- * ตั้งค่าห้อง (หน้า "ตั้งค่าห้อง")
+ * ประเภทห้อง (หน้า "ประเภทห้อง") — S/M/L/XL หรือประเภทที่แอดมินเพิ่มเอง
  * ========================================================== */
 
 // ตัดช่องว่างหัวท้าย + จำกัดความยาว (ข้อความที่ไม่ได้ส่งมาคงเป็น undefined → COALESCE เก็บค่าเดิม)
@@ -597,67 +598,251 @@ function trimmedText(value, maxLength, label) {
   return text;
 }
 
-// GET /api/admin/rooms
+// ราคาต่อชั่วโมง: ตัวเลข 0-100,000 บาท
+function parsePrice(value, label) {
+  const n = Number(value);
+  if (value === '' || value === null || !Number.isFinite(n) || n < 0 || n > 100000) {
+    throw new HttpError(400, `${label}ต้องเป็นตัวเลข 0-100,000 บาท`);
+  }
+  return n;
+}
+
+// จำนวนคน: จำนวนเต็ม 1-100
+function parseCapacity(value, label) {
+  const n = Number(value);
+  if (value === '' || value === null || !Number.isInteger(n) || n < 1 || n > 100) {
+    throw new HttpError(400, `${label}ต้องเป็นจำนวนเต็ม 1-100 คน`);
+  }
+  return n;
+}
+
+// ตรวจข้อมูลประเภทห้องจากฟอร์ม (ใช้ทั้งเพิ่มและแก้ไข — แก้ไขต้องส่งมาครบทุกช่องเหมือนกัน)
+function parseRoomTypeBody(body) {
+  const code = typeof body.code === 'string' ? body.code.trim().toUpperCase() : '';
+  if (!/^[A-Z0-9-]{1,10}$/.test(code)) {
+    throw new HttpError(400, 'รหัสประเภทต้องเป็นตัวอักษรอังกฤษ/ตัวเลข ไม่เกิน 10 ตัว เช่น S, M, VIP');
+  }
+  const name = trimmedText(body.name, 100, 'ชื่อประเภท');
+  if (!name) throw new HttpError(400, 'กรุณากรอกชื่อประเภท');
+  const capacityMin = parseCapacity(body.capacityMin, 'ความจุต่ำสุด');
+  const capacityMax = parseCapacity(body.capacityMax, 'ความจุสูงสุด');
+  if (capacityMax < capacityMin) throw new HttpError(400, 'ความจุสูงสุดต้องไม่น้อยกว่าความจุต่ำสุด');
+  return {
+    code,
+    name,
+    capacityMin,
+    capacityMax,
+    basePrice: parsePrice(body.basePricePerHour, 'ราคาห้องธรรมดา'),
+    description: trimmedText(body.description, 300, 'คำอธิบาย') || null,
+  };
+}
+
+const ROOM_TYPE_ERRORS = { 23505: [409, 'รหัสประเภทนี้มีอยู่แล้ว'] };
+
+// GET /api/admin/room-types -- ทุกประเภท + จำนวนห้อง (ทั้งหมด / ห้องธรรมดา / ห้องธีม)
+router.get(
+  '/room-types',
+  route(async (req, res) => {
+    const types = await pool.query(
+      `SELECT t.*,
+              COUNT(r.room_id)::int AS room_count,
+              COUNT(r.room_id) FILTER (WHERE r.theme IS NULL)::int AS normal_room_count,
+              COUNT(r.room_id) FILTER (WHERE r.theme IS NOT NULL)::int AS theme_room_count
+       FROM room_type t LEFT JOIN room r ON r.type_id = t.type_id
+       GROUP BY t.type_id
+       ORDER BY t.capacity_min, t.code`,
+    );
+    res.json(types.rows);
+  }),
+);
+
+// POST /api/admin/room-types  { code, name, capacityMin, capacityMax, basePricePerHour, description }
+router.post(
+  '/room-types',
+  route(async (req, res) => {
+    const t = parseRoomTypeBody(req.body);
+    const type = (
+      await pool.query(
+        `INSERT INTO room_type (code, name, capacity_min, capacity_max, base_price_per_hour, description)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [t.code, t.name, t.capacityMin, t.capacityMax, t.basePrice, t.description],
+      )
+    ).rows[0];
+    res.status(201).json(type);
+  }, ROOM_TYPE_ERRORS),
+);
+
+// PATCH /api/admin/room-types/:id  { code, name, capacityMin, capacityMax, basePricePerHour, description, applyToRoomIds }
+// applyToRoomIds = ห้องธรรมดาในประเภทนี้ที่แอดมินเลือกให้เปลี่ยนเป็นราคาใหม่ (ไม่ส่ง/[] = ไม่เปลี่ยนราคาห้องไหน)
+// ห้องธีมไม่ถูกเปลี่ยนราคาจากตรงนี้เด็ดขาด (ห้องธีมแอดมินตั้งราคาเองที่หน้าตั้งค่าห้อง)
+router.patch(
+  '/room-types/:id',
+  route(async (req, res) => {
+    const t = parseRoomTypeBody(req.body);
+    const ids = req.body.applyToRoomIds ?? [];
+    if (!Array.isArray(ids) || !ids.every((id) => Number.isInteger(id) && id > 0)) {
+      throw new HttpError(400, 'รายการห้องที่จะเปลี่ยนราคาไม่ถูกต้อง');
+    }
+    const result = await withTransaction(async (client) => {
+      const type = (
+        await client.query(
+          `UPDATE room_type SET code = $2, name = $3, capacity_min = $4, capacity_max = $5,
+             base_price_per_hour = $6, description = $7
+           WHERE type_id = $1
+           RETURNING *`,
+          [req.params.id, t.code, t.name, t.capacityMin, t.capacityMax, t.basePrice, t.description],
+        )
+      ).rows[0];
+      if (!type) throw new HttpError(404, 'ไม่พบประเภทห้อง');
+      const updated = await client.query(
+        `UPDATE room SET price_per_hour = $2
+         WHERE type_id = $1 AND theme IS NULL AND room_id = ANY($3::int[])
+         RETURNING room_id`,
+        [type.type_id, t.basePrice, ids],
+      );
+      return { ...type, updated_room_count: updated.rowCount };
+    });
+    res.json(result);
+  }, ROOM_TYPE_ERRORS),
+);
+
+// DELETE /api/admin/room-types/:id -- ลบได้เฉพาะประเภทที่ไม่มีห้องแล้ว
+router.delete(
+  '/room-types/:id',
+  route(
+    async (req, res) => {
+      const type = (await pool.query('DELETE FROM room_type WHERE type_id = $1 RETURNING *', [req.params.id])).rows[0];
+      if (!type) throw new HttpError(404, 'ไม่พบประเภทห้อง');
+      res.json(type);
+    },
+    { 23503: [409, 'ลบประเภทนี้ไม่ได้ เนื่องจากยังมีห้องอยู่ในประเภทนี้ (ย้ายหรือลบห้องก่อน)'] },
+  ),
+);
+
+/* ============================================================
+ * ตั้งค่าห้อง (หน้า "ตั้งค่าห้อง")
+ * ========================================================== */
+
+// ห้อง 1 ห้องพร้อมข้อมูลประเภท (type_base_price = ราคาห้องธรรมดาของประเภท ไว้ให้หน้าเว็บเทียบ)
+const ADMIN_ROOM_SQL = `
+  SELECT r.*, ${ROOM_TYPE_COLUMNS}, t.base_price_per_hour AS type_base_price
+  FROM room r ${joinRoomType('r')}`;
+
+async function getAdminRoom(db, roomId) {
+  return (await db.query(`${ADMIN_ROOM_SQL} WHERE r.room_id = $1`, [roomId])).rows[0];
+}
+
+async function getRoomType(db, typeId) {
+  const type = (await db.query('SELECT * FROM room_type WHERE type_id = $1', [typeId])).rows[0];
+  if (!type) throw new HttpError(404, 'ไม่พบประเภทห้อง');
+  return type;
+}
+
+// GET /api/admin/rooms -- ทุกห้อง (รวมที่ปิดให้บริการ) เรียงตามประเภท
 router.get(
   '/rooms',
   route(async (req, res) => {
-    res.json((await pool.query('SELECT * FROM room ORDER BY room_id')).rows);
+    res.json((await pool.query(`${ADMIN_ROOM_SQL} ORDER BY t.capacity_min, t.code, r.room_name`)).rows);
   }),
 );
 
-// PATCH /api/admin/rooms/:id
+// PATCH /api/admin/rooms/:id  { roomName, typeId, capacity, pricePerHour, imageUrl, isActive, description, theme }
+// theme: '' = ห้องธรรมดา / มีชื่อ = ห้องธีม / ไม่ส่ง = คงเดิม
 router.patch(
   '/rooms/:id',
-  route(async (req, res) => {
-    const { roomName, size, capacity, pricePerHour, imageUrl, isActive } = req.body;
-    const description = trimmedText(req.body.description, 300, 'หมายเหตุ');
-    const theme = trimmedText(req.body.theme, 100, 'ธีมห้อง');
-    const room = (
-      await pool.query(
+  route(
+    async (req, res) => {
+      const { roomName, typeId, imageUrl, isActive } = req.body;
+      const capacity = req.body.capacity === undefined ? undefined : parseCapacity(req.body.capacity, 'ความจุ');
+      const price =
+        req.body.pricePerHour === undefined ? undefined : parsePrice(req.body.pricePerHour, 'ราคาต่อชั่วโมง');
+      const description = trimmedText(req.body.description, 300, 'หมายเหตุ');
+      const theme = trimmedText(req.body.theme, 100, 'ธีมห้อง');
+      const updated = await pool.query(
         `UPDATE room SET
-       room_name = COALESCE($1, room_name),
-       size = COALESCE($2, size),
-       capacity = COALESCE($3, capacity),
-       price_per_hour = COALESCE($4, price_per_hour),
-       image_url = COALESCE($5, image_url),
-       is_active = COALESCE($6, is_active),
-       description = COALESCE($7, description),
-       theme = COALESCE($8, theme)
-     WHERE room_id = $9
-     RETURNING *`,
-        [roomName, size, capacity, pricePerHour, imageUrl, isActive, description, theme, req.params.id],
-      )
-    ).rows[0];
-    if (!room) throw new HttpError(404, 'ไม่พบห้อง');
-    res.json(room);
-  }),
+           room_name = COALESCE($1, room_name),
+           type_id = COALESCE($2, type_id),
+           capacity = COALESCE($3, capacity),
+           price_per_hour = COALESCE($4, price_per_hour),
+           image_url = COALESCE($5, image_url),
+           is_active = COALESCE($6, is_active),
+           description = COALESCE($7, description),
+           theme = CASE WHEN $8::text IS NULL THEN theme ELSE NULLIF($8::text, '') END
+         WHERE room_id = $9`,
+        [roomName, typeId, capacity, price, imageUrl, isActive, description, theme, req.params.id],
+      );
+      if (!updated.rowCount) throw new HttpError(404, 'ไม่พบห้อง');
+      res.json(await getAdminRoom(pool, req.params.id));
+    },
+    { 23503: [404, 'ไม่พบประเภทห้อง'] },
+  ),
 );
 
-// POST /api/admin/rooms -- เพิ่มห้องใหม่ (ปุ่ม + ในหน้า "ตั้งค่าห้อง")
+// สร้างห้องใหม่ 1 ห้องตามประเภท — ความจุ/ราคาใช้ค่าของประเภทเป็นค่าเริ่มต้น (ห้องธรรมดา)
+async function insertRoom(db, type, roomName) {
+  const shop = await getShop(db);
+  const room = (
+    await db.query(
+      `INSERT INTO room (shop_id, room_code, room_name, type_id, capacity, price_per_hour)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING room_id`,
+      [shop?.shop_id || null, makeCode('R'), roomName, type.type_id, type.capacity_max, type.base_price_per_hour],
+    )
+  ).rows[0];
+  return getAdminRoom(db, room.room_id);
+}
+
+// POST /api/admin/rooms  { typeId, roomName } -- เพิ่มห้องเดียว
 router.post(
   '/rooms',
   route(async (req, res) => {
-    const { roomName, size, capacity, pricePerHour, imageUrl, description, theme } = req.body;
-    const shop = await getShop();
-    const room = (
-      await pool.query(
-        `INSERT INTO room (shop_id, room_code, room_name, size, capacity, price_per_hour, image_url, description, theme)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-     RETURNING *`,
-        [
-          shop?.shop_id || null,
-          makeCode('R'),
-          roomName || 'ห้องใหม่',
-          size || 'S',
-          capacity || null,
-          pricePerHour || 0,
-          imageUrl || null,
-          description || null,
-          theme || null,
-        ],
-      )
-    ).rows[0];
-    res.status(201).json(room);
+    const type = await getRoomType(pool, req.body.typeId);
+    const roomName = trimmedText(req.body.roomName, 100, 'ชื่อห้อง') || 'ห้องใหม่';
+    res.status(201).json(await insertRoom(pool, type, roomName));
+  }),
+);
+
+const BULK_MAX_PER_TYPE = 20;
+const BULK_MAX_TOTAL = 50;
+
+// POST /api/admin/rooms/bulk  { items: [{ typeId, count }, ...] } -- เพิ่มห้องธรรมดาทีละหลายห้องตามประเภท
+// ตั้งชื่ออัตโนมัติเป็น <รหัสประเภท>-<เลข 2 หลัก> ต่อจากเลขที่มากที่สุดที่มีอยู่แล้ว เช่น S-01, S-02 (แก้ชื่อทีหลังได้)
+router.post(
+  '/rooms/bulk',
+  route(async (req, res) => {
+    const { items } = req.body;
+    if (!Array.isArray(items)) throw new HttpError(400, 'ต้องส่ง items เป็น array');
+    const wanted = items.filter((it) => Number(it?.count) !== 0);
+    for (const it of wanted) {
+      const n = Number(it.count);
+      if (!Number.isInteger(n) || n < 0 || n > BULK_MAX_PER_TYPE) {
+        throw new HttpError(400, `จำนวนห้องต่อประเภทต้องเป็นจำนวนเต็ม 0-${BULK_MAX_PER_TYPE}`);
+      }
+    }
+    const total = wanted.reduce((sum, it) => sum + Number(it.count), 0);
+    if (total < 1) throw new HttpError(400, 'กรุณาใส่จำนวนห้องที่จะเพิ่มอย่างน้อย 1 ห้อง');
+    if (total > BULK_MAX_TOTAL) throw new HttpError(400, `เพิ่มได้ครั้งละไม่เกิน ${BULK_MAX_TOTAL} ห้อง`);
+
+    const created = await withTransaction(async (client) => {
+      const rooms = [];
+      for (const it of wanted) {
+        const type = await getRoomType(client, it.typeId);
+        // เลขล่าสุดของชื่อแบบ "S-01" ในประเภทนี้ (ชื่อที่แอดมินเปลี่ยนไปแล้วไม่นับ)
+        const last = (
+          await client.query(
+            `SELECT COALESCE(MAX(substring(room_name FROM '^' || $1 || '-([0-9]+)$')::int), 0) AS n
+             FROM room WHERE room_name ~ ('^' || $1 || '-[0-9]+$')`,
+            [type.code],
+          )
+        ).rows[0].n;
+        for (let i = 1; i <= Number(it.count); i++) {
+          rooms.push(await insertRoom(client, type, `${type.code}-${String(last + i).padStart(2, '0')}`));
+        }
+      }
+      return rooms;
+    });
+    res.status(201).json(created);
   }),
 );
 

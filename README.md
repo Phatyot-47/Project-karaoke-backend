@@ -1,7 +1,7 @@
 # Gens Karaoke Backend API
 
 Backend สำหรับระบบจองห้องคาราโอเกะ Gens Karaoke & Board Game (Node.js + Express + PostgreSQL)
-ฐานข้อมูลมี 9 ตาราง: users, shop, shop_hours, shop_policy, room, booking, payment, service_session, extension
+ฐานข้อมูลมี 10 ตาราง: users, shop, shop_hours, shop_policy, room_type, room, booking, payment, service_session, extension
 
 ## ติดตั้ง
 
@@ -23,7 +23,8 @@ JWT_SECRET=สุ่มค่ายาวๆ เอง (ดูคำสั่ง
 1. สร้าง database เปล่าชื่อ `gens_karaoke` ใน pgAdmin
 2. รัน `db/schema.sql` (เปิดใน Query Tool ของ pgAdmin แล้วกด Execute หรือ `psql "$DATABASE_URL" -f db/schema.sql`)
    ไฟล์นี้รวมทุก migration แล้ว และตั้ง timezone ของ database เป็น Asia/Bangkok ให้อัตโนมัติ
-3. เพิ่มข้อมูลร้าน เวลาเปิด-ปิด นโยบายมัดจำ ห้อง และบัญชีแอดมิน
+3. เพิ่มข้อมูลร้าน เวลาเปิด-ปิด นโยบายมัดจำ ประเภทห้อง ห้อง และบัญชีแอดมิน
+   (ประเภท S/M/L/XL เริ่มต้นอยู่ใน `db/migrations/0007_add_room_type.sql` รันไฟล์นั้นต่อได้เลย)
    (รหัสผ่านแอดมินเก็บแบบ hash: `crypt('รหัสผ่าน', gen_salt('bf'))`)
 
 ส่วน `db/migrations/` เก็บไว้ดูประวัติการแก้โครงสร้าง ใช้กับ DB เก่าที่สร้างก่อนมี schema.sql เท่านั้น
@@ -51,7 +52,8 @@ npm run format  # จัดรูปแบบโค้ดด้วย Prettier
 
 ### ห้อง / ร้าน
 
-- 🔓 `GET /api/rooms?size=S|M|L|XL|all&start=&end=` (ส่ง start/end จะได้ `is_available`)
+- 🔓 `GET /api/rooms?size=<รหัสประเภท>|all&start=&end=` (ส่ง start/end จะได้ `is_available`)
+- 🔓 `GET /api/room-types` (ประเภทห้อง + จำนวนห้อง + ราคาเริ่มต้น)
 - 🔓 `GET /api/rooms/:id`
 - 🔓 `GET /api/rooms/:id/availability?date=YYYY-MM-DD`
 - 🔓 `GET /api/shop`
@@ -84,7 +86,10 @@ npm run format  # จัดรูปแบบโค้ดด้วย Prettier
 - 🛠 `PATCH /api/admin/shop` `{ name, taxId, phone, address, bankName, bankAccountNo, bankAccountName, qrCodeUrl, peakStartTime, peakSurcharge, floorPlanUrl }`
 - 🛠 `PATCH /api/admin/shop/hours` `{ hours: [{ dayOfWeek, openHour, closeHour }] }`
 - 🛠 `PATCH /api/admin/policy` `{ depositPercent, cancelHoursBefore, allowEditBeforeHours, refundPolicyDesc, noShowPolicyDesc }`
-- 🛠 `GET /api/admin/rooms` · `POST /api/admin/rooms` · `PATCH /api/admin/rooms/:id` · `DELETE /api/admin/rooms/:id`
+- 🛠 `GET /api/admin/room-types` · `POST /api/admin/room-types` `{ code, name, capacityMin, capacityMax, basePricePerHour, description }`
+- 🛠 `PATCH /api/admin/room-types/:id` (ฟิลด์เดียวกัน + `applyToRoomIds` = ห้องธรรมดาที่จะเปลี่ยนเป็นราคาใหม่) · `DELETE /api/admin/room-types/:id`
+- 🛠 `GET /api/admin/rooms` · `POST /api/admin/rooms` `{ typeId, roomName }` · `PATCH /api/admin/rooms/:id` · `DELETE /api/admin/rooms/:id`
+- 🛠 `POST /api/admin/rooms/bulk` `{ items: [{ typeId, count }] }` (เพิ่มห้องธรรมดาหลายห้อง ตั้งชื่อ S-01, S-02 ... ให้อัตโนมัติ)
 - 🛠 `GET /api/admin/reports?period=day|week|month`
 
 ## หมายเหตุ
@@ -94,3 +99,4 @@ npm run format  # จัดรูปแบบโค้ดด้วย Prettier
 - การจองออนไลน์ที่ไม่แนบสลิปภายใน 5 นาทีจะถูกยกเลิกอัตโนมัติ (`src/utils/expireBookings.js`)
 - รหัสผ่านทั้งลูกค้าและแอดมินเก็บเป็น hash ด้วย pgcrypto `crypt()`
 - ข้อมูลที่ส่งมาผิดรูปแบบ (เช่น id ไม่ใช่ตัวเลข วันที่ผิด) ตอบ 400 ไม่ใช่ 500
+- ประเภทห้อง (room_type) มีราคาห้องธรรมดา — ห้องใหม่ใช้ราคานี้ เปลี่ยนราคาประเภทแล้วแอดมินเลือกได้ว่าห้องธรรมดาห้องไหนเปลี่ยนตาม ส่วนห้องธีม (`room.theme` ไม่ว่าง) แอดมินตั้งราคาเองรายห้อง
