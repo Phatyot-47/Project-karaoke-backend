@@ -261,7 +261,7 @@ router.patch(
       }
       return (
         await client.query(
-          `UPDATE booking SET booking_status = 'cancelled', cancel_reason = $2, updated_at = now()
+          `UPDATE booking SET booking_status = 'cancelled', cancel_reason = $2, cancelled_by = 'customer', updated_at = now()
        WHERE booking_id = $1
        RETURNING *`,
           [req.params.id, req.body.reason || 'ลูกค้ายกเลิกเอง'],
