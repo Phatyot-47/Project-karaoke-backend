@@ -93,6 +93,8 @@ CREATE TABLE public.booking (
     cancel_reason text,
     created_at timestamp without time zone DEFAULT now() NOT NULL,
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    cancelled_by character varying(10),
+    CONSTRAINT booking_cancelled_by_check CHECK (((cancelled_by)::text = ANY ((ARRAY['customer'::character varying, 'shop'::character varying, 'system'::character varying])::text[]))),
     CONSTRAINT booking_check CHECK ((end_datetime > start_datetime)),
     CONSTRAINT booking_check1 CHECK (((customer_id IS NOT NULL) OR (walkin_name IS NOT NULL))),
     CONSTRAINT booking_deposit_status_check CHECK (((deposit_status)::text = ANY ((ARRAY['unpaid'::character varying, 'pending_verify'::character varying, 'paid'::character varying])::text[]))),
@@ -210,7 +212,7 @@ CREATE TABLE public.payment (
     verified_by integer,
     verified_at timestamp without time zone,
     remark text,
-    CONSTRAINT payment_method_check CHECK (((method)::text = 'qrcode'::text)),
+    CONSTRAINT payment_method_check CHECK (((method)::text = ANY ((ARRAY['qrcode'::character varying, 'cash'::character varying])::text[]))),
     CONSTRAINT payment_status_check CHECK (((payment_status)::text = ANY ((ARRAY['pending'::character varying, 'paid'::character varying, 'rejected'::character varying])::text[]))),
     CONSTRAINT payment_type_check CHECK (((payment_type)::text = 'deposit'::text))
 );

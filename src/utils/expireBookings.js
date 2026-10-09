@@ -19,6 +19,7 @@ async function expireStalePendingBookings() {
     UPDATE booking
     SET booking_status = 'cancelled',
         cancel_reason = 'หมดเวลาชำระมัดจำ (ระบบยกเลิกอัตโนมัติ)',
+        cancelled_by = 'system',
         updated_at = now()
     WHERE booking_status = 'pending'
       AND booking_source = 'customer_online'

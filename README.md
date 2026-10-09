@@ -27,7 +27,7 @@ JWT_SECRET=สุ่มค่ายาวๆ เอง (ดูคำสั่ง
    (ประเภท S/M/L/XL เริ่มต้นอยู่ใน `db/migrations/0007_add_room_type.sql` รันไฟล์นั้นต่อได้เลย)
    (รหัสผ่านแอดมินเก็บแบบ hash: `crypt('รหัสผ่าน', gen_salt('bf'))`)
 
-ส่วน `db/migrations/` เก็บไว้ดูประวัติการแก้โครงสร้าง ใช้กับ DB เก่าที่สร้างก่อนมี schema.sql เท่านั้น
+ส่วน `db/migrations/` ใช้อัปเดต DB เดิมที่มีอยู่แล้ว — รันไฟล์ที่ยังไม่เคยรันตามลำดับเลข (0006-0010 รันซ้ำได้ปลอดภัย)
 
 ## รัน
 
@@ -82,7 +82,8 @@ npm run format  # จัดรูปแบบโค้ดด้วย Prettier
 - 🛠 `GET /api/admin/alerts?afterPaymentId=` (แจ้งเตือนแอดมิน: จำนวนรอดำเนินการ + สลิปใหม่หลัง payment_id ที่ส่งมา — หน้าแอดมินเรียกทุก 15 วินาที)
 - 🛠 `GET /api/admin/bookings/today`
 - 🛠 `GET /api/admin/bookings/history`
-- 🛠 `PATCH /api/admin/bookings/:id/confirm`
+- 🛠 `PATCH /api/admin/bookings/:id/confirm` (ต้องได้รับมัดจำครบก่อน)
+- 🛠 `PATCH /api/admin/bookings/:id/cash-deposit` (ลูกค้าจ่ายมัดจำเงินสดที่หน้าร้าน)
 - 🛠 `PATCH /api/admin/bookings/:id/reject` `{ reason }`
 - 🛠 `PATCH /api/admin/bookings/:id/no-show` `{ reason }`
 - 🛠 `PATCH /api/admin/bookings/:id/change-room` `{ roomId }`
@@ -108,3 +109,5 @@ npm run format  # จัดรูปแบบโค้ดด้วย Prettier
 - รหัสผ่านทั้งลูกค้าและแอดมินเก็บเป็น hash ด้วย pgcrypto `crypt()`
 - ข้อมูลที่ส่งมาผิดรูปแบบ (เช่น id ไม่ใช่ตัวเลข วันที่ผิด) ตอบ 400 ไม่ใช่ 500
 - ประเภทห้อง (room_type) มีราคาห้องธรรมดา — ห้องใหม่ใช้ราคานี้ เปลี่ยนราคาประเภทแล้วแอดมินเลือกได้ว่าห้องธรรมดาห้องไหนเปลี่ยนตาม ส่วนห้องธีม (`room.theme` ไม่ว่าง) แอดมินตั้งราคาเองรายห้อง
+- นโยบายมัดจำ: ลูกค้ายกเลิกเอง/ไม่มาใช้บริการ = ร้านเก็บมัดจำ (นับเป็นรายได้ในรายงาน) / ร้านยกเลิก = สลิปที่ค้างตรวจไม่ผ่านอัตโนมัติ ร้านคืนเงินนอกระบบ (`booking.cancelled_by`)
+- ลิงก์ไฟล์ที่อัปโหลดเก็บเป็น `/uploads/...` (ไม่ผูกชื่อเครื่อง) หน้าเว็บเติมที่อยู่ backend ให้เอง

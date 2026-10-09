@@ -49,7 +49,8 @@ router.post('/', requireLogin, (req, res, next) => {
     } catch (e) {
       return next(e);
     }
-    res.status(201).json({ url: `${req.protocol}://${req.get('host')}/uploads/${filename}` });
+    // ส่งกลับเป็น path (/uploads/...) ไม่ใส่ชื่อเครื่อง — หน้าเว็บเติมที่อยู่ backend เอง เปิดจากเครื่องไหนรูปก็ขึ้น
+    res.status(201).json({ url: `/uploads/${filename}` });
   });
 });
 

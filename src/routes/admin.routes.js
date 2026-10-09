@@ -12,6 +12,7 @@ const { submittedDepositSql } = require('../utils/deposit');
 const { requireAdmin } = require('../utils/auth');
 const { ROOM_TYPE_COLUMNS, joinRoomType } = require('../utils/roomType');
 const { notifyBookingCustomer } = require('../utils/notify');
+const { normalizePhone } = require('../utils/validate');
 
 // ทุก route ในไฟล์นี้ต้องล็อกอินเป็นแอดมิน — ผู้ทำรายการ (checked_in_by, verified_by ฯลฯ) = แอดมินเจ้าของ token
 router.use(requireAdmin);
@@ -39,8 +40,17 @@ const BOOKING_LIST_JOINS = `
   LEFT JOIN service_session s ON s.booking_id = b.booking_id`;
 
 // รายได้ของ booking: ใช้บริการ/ยืนยันแล้ว = ยอดรวม, ไม่มาใช้บริการ (no-show) = มัดจำที่ร้านเก็บไว้ (ไม่คืน)
-const REVENUE_STATUSES = `('confirmed','completed','no_show')`;
-const REVENUE_SQL = `CASE WHEN booking_status = 'no_show' THEN deposit_required ELSE price_total END`;
+// ลูกค้ายกเลิกเอง (cancelled_by = 'customer') = ร้านเก็บมัดจำที่ตรวจผ่านแล้วไว้ตามนโยบาย → นับเป็นรายได้ด้วย
+// (ร้านยกเลิก = คืนเงินนอกระบบ ไม่นับ) — a = alias ของตาราง booking ใน query นั้น
+const paidDepositSql = (a) =>
+  `(SELECT COALESCE(SUM(amount), 0) FROM payment WHERE payment.booking_id = ${a}.booking_id AND payment.payment_status = 'paid')`;
+const revenueFilter = (a) =>
+  `(${a}.booking_status IN ('confirmed','completed','no_show')
+    OR (${a}.booking_status = 'cancelled' AND ${a}.cancelled_by = 'customer' AND ${paidDepositSql(a)} > 0))`;
+const revenueSql = (a) =>
+  `CASE WHEN ${a}.booking_status = 'no_show' THEN ${a}.deposit_required
+        WHEN ${a}.booking_status = 'cancelled' THEN ${paidDepositSql(a)}
+        ELSE ${a}.price_total END`;
 
 // GET /api/admin/bookings/today -- การ์ดสรุป + รายการจองวันนี้
 router.get(
@@ -52,7 +62,7 @@ router.get(
       COUNT(*) FILTER (WHERE booking_status = 'pending')   AS pending_count,
       COUNT(*) FILTER (WHERE booking_status = 'confirmed') AS in_progress_count,
       COUNT(*) FILTER (WHERE booking_status = 'completed') AS completed_count,
-      COALESCE(SUM(${REVENUE_SQL}) FILTER (WHERE booking_status IN ${REVENUE_STATUSES}), 0) AS revenue_today,
+      COALESCE(SUM(${revenueSql('booking')}) FILTER (WHERE ${revenueFilter('booking')}), 0) AS revenue_today,
       (SELECT COUNT(*) FROM booking o
        WHERE o.booking_date < CURRENT_DATE AND o.booking_status IN ('pending','confirmed')
          AND NOT EXISTS (SELECT 1 FROM service_session ss WHERE ss.booking_id = o.booking_id)) AS overdue_count
@@ -162,6 +172,7 @@ async function rejectPendingSlipsOnShopCancel(client, bookingId, adminId) {
 }
 
 // PATCH /api/admin/bookings/:id/confirm -- กดปุ่ม "ยืนยัน" (ยืนยันรายการที่เลยเวลาสิ้นสุดไปแล้วไม่ได้)
+// ต้องได้รับมัดจำครบก่อน (ตรวจสลิปผ่าน หรือกด "รับมัดจำเงินสดแล้ว") — กันยืนยันการจองที่ร้านยังไม่ได้เงิน
 router.patch(
   '/bookings/:id/confirm',
   route(async (req, res) => {
@@ -170,15 +181,63 @@ router.patch(
         await client.query(
           `UPDATE booking SET booking_status = 'confirmed', updated_at = now()
            WHERE booking_id = $1 AND booking_status = 'pending' AND end_datetime > LOCALTIMESTAMP
+             AND deposit_status = 'paid'
            RETURNING *`,
           [req.params.id],
         )
       ).rows[0];
-      if (!updated) throw new HttpError(404, 'ไม่พบรายการ สถานะไม่ใช่ pending หรือเลยเวลาของการจองนี้แล้ว');
+      if (!updated) {
+        const found = (
+          await client.query('SELECT deposit_status, booking_status FROM booking WHERE booking_id = $1', [
+            req.params.id,
+          ])
+        ).rows[0];
+        if (found?.booking_status === 'pending' && found.deposit_status !== 'paid') {
+          throw new HttpError(409, 'ยังไม่ได้รับมัดจำครบ — ตรวจสลิปให้ผ่านก่อน หรือกด "รับมัดจำเงินสดแล้ว"');
+        }
+        throw new HttpError(404, 'ไม่พบรายการ สถานะไม่ใช่ pending หรือเลยเวลาของการจองนี้แล้ว');
+      }
       await notifyBookingCustomer(client, updated.booking_id, 'booking_confirmed');
       return updated;
     });
     res.json(booking);
+  }),
+);
+
+// PATCH /api/admin/bookings/:id/cash-deposit -- กดปุ่ม "รับมัดจำเงินสดแล้ว" (ลูกค้าจ่ายมัดจำเป็นเงินสดที่หน้าร้าน)
+// บันทึกเป็นการชำระเงินแบบเงินสด (ตรวจผ่านแล้ว) เท่ากับยอดมัดจำที่ยังขาด แล้วแอดมินกดยืนยันการจองต่อได้
+// ถ้ามีสลิปรอตรวจอยู่ ให้ตรวจสลิปก่อน (กันรับเงินซ้ำ)
+router.patch(
+  '/bookings/:id/cash-deposit',
+  route(async (req, res) => {
+    const payment = await withTransaction(async (client) => {
+      const b = (
+        await client.query(
+          `SELECT booking_id, booking_status, deposit_required - ${paidDepositSql('booking')} AS amount_due,
+                  EXISTS (SELECT 1 FROM payment p WHERE p.booking_id = booking.booking_id AND p.payment_status = 'pending') AS has_pending_slip
+           FROM booking WHERE booking_id = $1 FOR UPDATE`,
+          [req.params.id],
+        )
+      ).rows[0];
+      if (!b || !['pending', 'confirmed'].includes(b.booking_status)) {
+        throw new HttpError(404, 'ไม่พบรายการ หรือรายการนี้ถูกยกเลิก/เสร็จสิ้นไปแล้ว');
+      }
+      if (b.has_pending_slip) throw new HttpError(409, 'มีสลิปรอตรวจอยู่ — กรุณาตรวจสลิปก่อน');
+      if (Number(b.amount_due) <= 0) throw new HttpError(409, 'รายการนี้ได้รับมัดจำครบแล้ว');
+      const inserted = (
+        await client.query(
+          `INSERT INTO payment (booking_id, payment_type, amount, method, paid_at, payment_status, verified_by, verified_at, remark)
+           VALUES ($1, 'deposit', $2, 'cash', now(), 'paid', $3, now(), 'รับเงินสดที่หน้าร้าน')
+           RETURNING *`,
+          [b.booking_id, b.amount_due, req.user.id],
+        )
+      ).rows[0];
+      await client.query(`UPDATE booking SET deposit_status = 'paid', updated_at = now() WHERE booking_id = $1`, [
+        b.booking_id,
+      ]);
+      return inserted;
+    });
+    res.status(201).json(payment);
   }),
 );
 
@@ -191,7 +250,7 @@ router.patch(
     const booking = await withTransaction(async (client) => {
       const updated = (
         await client.query(
-          `UPDATE booking SET booking_status = 'cancelled', cancel_reason = $2, updated_at = now()
+          `UPDATE booking SET booking_status = 'cancelled', cancel_reason = $2, cancelled_by = 'shop', updated_at = now()
            WHERE booking_id = $1 AND booking_status IN ('pending','confirmed')
              AND NOT EXISTS (SELECT 1 FROM service_session s WHERE s.booking_id = booking.booking_id)
            RETURNING *`,
@@ -327,7 +386,7 @@ router.post(
             startDatetime,
             endDatetime,
             customerName || 'ลูกค้าหน้าร้าน',
-            customerPhone || null,
+            customerPhone ? normalizePhone(customerPhone) : null,
             q.basePrice,
             q.peakSurchargeTotal,
             q.priceTotal,
@@ -545,6 +604,7 @@ router.patch(
           `UPDATE booking SET deposit_status = 'unpaid',
            booking_status = CASE WHEN booking_status IN ('pending','confirmed') THEN 'cancelled' ELSE booking_status END,
            cancel_reason = CASE WHEN booking_status IN ('pending','confirmed') THEN $2 ELSE cancel_reason END,
+           cancelled_by = CASE WHEN booking_status IN ('pending','confirmed') THEN 'shop' ELSE cancelled_by END,
            updated_at = now()
          WHERE booking_id = $1`,
           [verified.booking_id, 'ปฏิเสธสลิป: ' + reason],
@@ -657,7 +717,7 @@ router.patch(
   route(async (req, res) => {
     const b = req.body;
     const depositPercent = Number(b.depositPercent);
-    if (b.depositPercent === '' || !Number.isFinite(depositPercent) || depositPercent < 0 || depositPercent > 100) {
+    if (b.depositPercent === '' || !Number.isFinite(depositPercent) || depositPercent <= 0 || depositPercent > 100) {
       throw new HttpError(400, 'เปอร์เซ็นต์มัดจำต้องเป็นตัวเลข 0-100');
     }
     const cancelHours = policyHours(b.cancelHoursBefore, 'ยกเลิกล่วงหน้า');
@@ -685,6 +745,17 @@ router.patch(
   route(async (req, res) => {
     const { hours } = req.body;
     if (!Array.isArray(hours) || !hours.length) throw new HttpError(400, 'ต้องส่ง hours เป็น array');
+    // วัน 0-6 (อาทิตย์-เสาร์) / ชั่วโมง 0-24 / เวลาเปิดต้องก่อนเวลาปิด (เปิด = ปิด หมายถึงปิดทั้งวัน)
+    const isInt = (v, min, max) => Number.isInteger(v) && v >= min && v <= max;
+    for (const h of hours) {
+      if (!isInt(h?.dayOfWeek, 0, 6)) throw new HttpError(400, 'วันในสัปดาห์ต้องเป็น 0-6 (อาทิตย์-เสาร์)');
+      if (!isInt(h.openHour, 0, 24) || !isInt(h.closeHour, 0, 24)) {
+        throw new HttpError(400, 'เวลาเปิด-ปิดต้องเป็นชั่วโมงเต็ม 0-24');
+      }
+      if (h.openHour > h.closeHour) {
+        throw new HttpError(400, 'เวลาเปิดต้องไม่เกินเวลาปิด (ตั้งเปิดและปิดเท่ากัน = ปิดทั้งวัน)');
+      }
+    }
     const saved = await withTransaction(async (client) => {
       const shop = await getShop(client);
       if (!shop) throw new HttpError(404, 'ยังไม่ได้ตั้งค่าร้าน');
@@ -713,11 +784,11 @@ function trimmedText(value, maxLength, label) {
   return text;
 }
 
-// ราคาต่อชั่วโมง: ตัวเลข 0-100,000 บาท
+// ราคาต่อชั่วโมง: มากกว่า 0 ไม่เกิน 100,000 บาท (ราคา 0 = มัดจำ 0 → ลูกค้าจ่ายมัดจำไม่ได้ การจองจะถูกยกเลิกเอง)
 function parsePrice(value, label) {
   const n = Number(value);
-  if (value === '' || value === null || !Number.isFinite(n) || n < 0 || n > 100000) {
-    throw new HttpError(400, `${label}ต้องเป็นตัวเลข 0-100,000 บาท`);
+  if (value === '' || value === null || !Number.isFinite(n) || n <= 0 || n > 100000) {
+    throw new HttpError(400, `${label}ต้องมากกว่า 0 และไม่เกิน 100,000 บาท`);
   }
   return n;
 }
@@ -980,24 +1051,24 @@ router.get(
   '/reports',
   route(async (req, res) => {
     const period = ['day', 'week', 'month'].includes(req.query.period) ? req.query.period : 'day';
-    const inRange = `booking_status IN ${REVENUE_STATUSES} AND booking_date >= ${REPORT_RANGE_START[period]}`;
+    const inRange = (a) => `${revenueFilter(a)} AND ${a}.booking_date >= ${REPORT_RANGE_START[period]}`;
     const trend = await pool.query(
-      `SELECT date_trunc($1, booking_date::timestamp) AS period, SUM(${REVENUE_SQL}) AS revenue, COUNT(*) AS bookings
-     FROM booking WHERE ${inRange}
+      `SELECT date_trunc($1, booking_date::timestamp) AS period, SUM(${revenueSql('booking')}) AS revenue, COUNT(*) AS bookings
+     FROM booking WHERE ${inRange('booking')}
      GROUP BY 1 ORDER BY 1`,
       [period],
     );
     const byRoom = await pool.query(`
-    SELECT r.room_name, SUM(${REVENUE_SQL}) AS revenue, COUNT(*) AS bookings
+    SELECT r.room_name, SUM(${revenueSql('b')}) AS revenue, COUNT(*) AS bookings
     FROM booking b JOIN room r ON r.room_id = b.room_id
-    WHERE ${inRange}
+    WHERE ${inRange('b')}
     GROUP BY r.room_name
     ORDER BY revenue DESC`);
     const totals = await pool.query(`
-    SELECT COALESCE(SUM(${REVENUE_SQL}),0) AS total_revenue,
+    SELECT COALESCE(SUM(${revenueSql('booking')}),0) AS total_revenue,
            COUNT(*) AS total_bookings,
-           COALESCE(ROUND(AVG(${REVENUE_SQL}),2),0) AS avg_ticket
-    FROM booking WHERE ${inRange}`);
+           COALESCE(ROUND(AVG(${revenueSql('booking')}),2),0) AS avg_ticket
+    FROM booking WHERE ${inRange('booking')}`);
     res.json({ period, trend: trend.rows, byRoom: byRoom.rows, totals: totals.rows[0] });
   }),
 );
