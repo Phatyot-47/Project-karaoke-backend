@@ -12,6 +12,7 @@ const { submittedDepositSql } = require('../utils/deposit');
 const { requireAdmin } = require('../utils/auth');
 const { ROOM_TYPE_COLUMNS, joinRoomType } = require('../utils/roomType');
 const { notifyBookingCustomer } = require('../utils/notify');
+const { normalizePhone } = require('../utils/validate');
 
 // ทุก route ในไฟล์นี้ต้องล็อกอินเป็นแอดมิน — ผู้ทำรายการ (checked_in_by, verified_by ฯลฯ) = แอดมินเจ้าของ token
 router.use(requireAdmin);
@@ -385,7 +386,7 @@ router.post(
             startDatetime,
             endDatetime,
             customerName || 'ลูกค้าหน้าร้าน',
-            customerPhone || null,
+            customerPhone ? normalizePhone(customerPhone) : null,
             q.basePrice,
             q.peakSurchargeTotal,
             q.priceTotal,
@@ -716,7 +717,7 @@ router.patch(
   route(async (req, res) => {
     const b = req.body;
     const depositPercent = Number(b.depositPercent);
-    if (b.depositPercent === '' || !Number.isFinite(depositPercent) || depositPercent < 0 || depositPercent > 100) {
+    if (b.depositPercent === '' || !Number.isFinite(depositPercent) || depositPercent <= 0 || depositPercent > 100) {
       throw new HttpError(400, 'เปอร์เซ็นต์มัดจำต้องเป็นตัวเลข 0-100');
     }
     const cancelHours = policyHours(b.cancelHoursBefore, 'ยกเลิกล่วงหน้า');
@@ -744,6 +745,17 @@ router.patch(
   route(async (req, res) => {
     const { hours } = req.body;
     if (!Array.isArray(hours) || !hours.length) throw new HttpError(400, 'ต้องส่ง hours เป็น array');
+    // วัน 0-6 (อาทิตย์-เสาร์) / ชั่วโมง 0-24 / เวลาเปิดต้องก่อนเวลาปิด (เปิด = ปิด หมายถึงปิดทั้งวัน)
+    const isInt = (v, min, max) => Number.isInteger(v) && v >= min && v <= max;
+    for (const h of hours) {
+      if (!isInt(h?.dayOfWeek, 0, 6)) throw new HttpError(400, 'วันในสัปดาห์ต้องเป็น 0-6 (อาทิตย์-เสาร์)');
+      if (!isInt(h.openHour, 0, 24) || !isInt(h.closeHour, 0, 24)) {
+        throw new HttpError(400, 'เวลาเปิด-ปิดต้องเป็นชั่วโมงเต็ม 0-24');
+      }
+      if (h.openHour > h.closeHour) {
+        throw new HttpError(400, 'เวลาเปิดต้องไม่เกินเวลาปิด (ตั้งเปิดและปิดเท่ากัน = ปิดทั้งวัน)');
+      }
+    }
     const saved = await withTransaction(async (client) => {
       const shop = await getShop(client);
       if (!shop) throw new HttpError(404, 'ยังไม่ได้ตั้งค่าร้าน');
@@ -772,11 +784,11 @@ function trimmedText(value, maxLength, label) {
   return text;
 }
 
-// ราคาต่อชั่วโมง: ตัวเลข 0-100,000 บาท
+// ราคาต่อชั่วโมง: มากกว่า 0 ไม่เกิน 100,000 บาท (ราคา 0 = มัดจำ 0 → ลูกค้าจ่ายมัดจำไม่ได้ การจองจะถูกยกเลิกเอง)
 function parsePrice(value, label) {
   const n = Number(value);
-  if (value === '' || value === null || !Number.isFinite(n) || n < 0 || n > 100000) {
-    throw new HttpError(400, `${label}ต้องเป็นตัวเลข 0-100,000 บาท`);
+  if (value === '' || value === null || !Number.isFinite(n) || n <= 0 || n > 100000) {
+    throw new HttpError(400, `${label}ต้องมากกว่า 0 และไม่เกิน 100,000 บาท`);
   }
   return n;
 }
