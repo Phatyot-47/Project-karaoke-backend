@@ -77,6 +77,48 @@ router.get(
   }),
 );
 
+// GET /api/admin/alerts?afterPaymentId=<id> -- แจ้งเตือนฝั่งแอดมิน (หน้าแอดมินเรียกทุก 15 วินาที)
+// pendingCount = ตัวเลขบนเมนู "อนุมัติการจอง" (รอยืนยันวันนี้ + ค้างจากวันก่อน — นับแบบเดียวกับ /bookings/today)
+// newSlips = สลิปที่ยังรอตรวจ (ของการจองที่ยังไม่ถูกยกเลิก) และส่งมาหลัง payment_id ที่หน้าเว็บเห็นล่าสุด (payment_id เพิ่มขึ้นเรื่อยๆ ใช้เป็นตัวชี้ได้)
+// latestPaymentId = ให้หน้าเว็บจำไว้ส่งมาครั้งถัดไป (ครั้งแรกหน้าเว็บส่ง 0 แค่เพื่อเอาค่านี้ ไม่ต้องเด้งแจ้งเตือนของเก่า)
+router.get(
+  '/alerts',
+  route(async (req, res) => {
+    const after = Number(req.query.afterPaymentId ?? 0);
+    if (!Number.isInteger(after) || after < 0) throw new HttpError(400, 'afterPaymentId ต้องเป็นจำนวนเต็มตั้งแต่ 0');
+    await expireStalePendingBookings();
+    const [counts, latest, slips] = await Promise.all([
+      pool.query(`
+        SELECT
+          (SELECT COUNT(*) FROM booking WHERE booking_date = CURRENT_DATE AND booking_status = 'pending')
+          + (SELECT COUNT(*) FROM booking o
+             WHERE o.booking_date < CURRENT_DATE AND o.booking_status IN ('pending','confirmed')
+               AND NOT EXISTS (SELECT 1 FROM service_session ss WHERE ss.booking_id = o.booking_id)) AS n`),
+      pool.query('SELECT COALESCE(MAX(payment_id), 0) AS id FROM payment'),
+      pool.query(
+        `SELECT p.payment_id, p.booking_id, p.amount, r.room_name, COALESCE(u.name, b.walkin_name) AS customer_name,
+                b.start_datetime, b.end_datetime,
+                EXISTS (SELECT 1 FROM payment old WHERE old.booking_id = p.booking_id AND old.payment_id < p.payment_id
+                          AND old.payment_status = 'paid') AS is_topup
+         FROM payment p
+         JOIN booking b ON b.booking_id = p.booking_id
+         JOIN room r ON r.room_id = b.room_id
+         LEFT JOIN users u ON u.user_id = b.customer_id
+         WHERE p.payment_id > $1 AND p.payment_status = 'pending'
+           AND b.booking_status IN ('pending', 'confirmed') -- การจองที่ยกเลิกไปแล้วไม่ต้องเตือน
+         ORDER BY p.payment_id
+         LIMIT 20`,
+        [after],
+      ),
+    ]);
+    res.json({
+      pendingCount: Number(counts.rows[0].n),
+      latestPaymentId: latest.rows[0].id,
+      newSlips: slips.rows,
+    });
+  }),
+);
+
 // GET /api/admin/bookings/history -- หน้า "ประวัติการจอง" ของแอดมิน (ทุกสถานะ)
 router.get(
   '/bookings/history',
