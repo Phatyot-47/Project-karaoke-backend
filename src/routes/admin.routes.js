@@ -171,6 +171,7 @@ async function rejectPendingSlipsOnShopCancel(client, bookingId, adminId) {
 }
 
 // PATCH /api/admin/bookings/:id/confirm -- กดปุ่ม "ยืนยัน" (ยืนยันรายการที่เลยเวลาสิ้นสุดไปแล้วไม่ได้)
+// ต้องได้รับมัดจำครบก่อน (ตรวจสลิปผ่าน หรือกด "รับมัดจำเงินสดแล้ว") — กันยืนยันการจองที่ร้านยังไม่ได้เงิน
 router.patch(
   '/bookings/:id/confirm',
   route(async (req, res) => {
@@ -179,15 +180,63 @@ router.patch(
         await client.query(
           `UPDATE booking SET booking_status = 'confirmed', updated_at = now()
            WHERE booking_id = $1 AND booking_status = 'pending' AND end_datetime > LOCALTIMESTAMP
+             AND deposit_status = 'paid'
            RETURNING *`,
           [req.params.id],
         )
       ).rows[0];
-      if (!updated) throw new HttpError(404, 'ไม่พบรายการ สถานะไม่ใช่ pending หรือเลยเวลาของการจองนี้แล้ว');
+      if (!updated) {
+        const found = (
+          await client.query('SELECT deposit_status, booking_status FROM booking WHERE booking_id = $1', [
+            req.params.id,
+          ])
+        ).rows[0];
+        if (found?.booking_status === 'pending' && found.deposit_status !== 'paid') {
+          throw new HttpError(409, 'ยังไม่ได้รับมัดจำครบ — ตรวจสลิปให้ผ่านก่อน หรือกด "รับมัดจำเงินสดแล้ว"');
+        }
+        throw new HttpError(404, 'ไม่พบรายการ สถานะไม่ใช่ pending หรือเลยเวลาของการจองนี้แล้ว');
+      }
       await notifyBookingCustomer(client, updated.booking_id, 'booking_confirmed');
       return updated;
     });
     res.json(booking);
+  }),
+);
+
+// PATCH /api/admin/bookings/:id/cash-deposit -- กดปุ่ม "รับมัดจำเงินสดแล้ว" (ลูกค้าจ่ายมัดจำเป็นเงินสดที่หน้าร้าน)
+// บันทึกเป็นการชำระเงินแบบเงินสด (ตรวจผ่านแล้ว) เท่ากับยอดมัดจำที่ยังขาด แล้วแอดมินกดยืนยันการจองต่อได้
+// ถ้ามีสลิปรอตรวจอยู่ ให้ตรวจสลิปก่อน (กันรับเงินซ้ำ)
+router.patch(
+  '/bookings/:id/cash-deposit',
+  route(async (req, res) => {
+    const payment = await withTransaction(async (client) => {
+      const b = (
+        await client.query(
+          `SELECT booking_id, booking_status, deposit_required - ${paidDepositSql('booking')} AS amount_due,
+                  EXISTS (SELECT 1 FROM payment p WHERE p.booking_id = booking.booking_id AND p.payment_status = 'pending') AS has_pending_slip
+           FROM booking WHERE booking_id = $1 FOR UPDATE`,
+          [req.params.id],
+        )
+      ).rows[0];
+      if (!b || !['pending', 'confirmed'].includes(b.booking_status)) {
+        throw new HttpError(404, 'ไม่พบรายการ หรือรายการนี้ถูกยกเลิก/เสร็จสิ้นไปแล้ว');
+      }
+      if (b.has_pending_slip) throw new HttpError(409, 'มีสลิปรอตรวจอยู่ — กรุณาตรวจสลิปก่อน');
+      if (Number(b.amount_due) <= 0) throw new HttpError(409, 'รายการนี้ได้รับมัดจำครบแล้ว');
+      const inserted = (
+        await client.query(
+          `INSERT INTO payment (booking_id, payment_type, amount, method, paid_at, payment_status, verified_by, verified_at, remark)
+           VALUES ($1, 'deposit', $2, 'cash', now(), 'paid', $3, now(), 'รับเงินสดที่หน้าร้าน')
+           RETURNING *`,
+          [b.booking_id, b.amount_due, req.user.id],
+        )
+      ).rows[0];
+      await client.query(`UPDATE booking SET deposit_status = 'paid', updated_at = now() WHERE booking_id = $1`, [
+        b.booking_id,
+      ]);
+      return inserted;
+    });
+    res.status(201).json(payment);
   }),
 );
 
