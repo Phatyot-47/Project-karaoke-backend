@@ -79,6 +79,7 @@ npm run format  # จัดรูปแบบโค้ดด้วย Prettier
 
 ### แอดมิน
 
+- 🛠 `GET /api/admin/alerts?afterPaymentId=` (แจ้งเตือนแอดมิน: จำนวนรอดำเนินการ + สลิปใหม่หลัง payment_id ที่ส่งมา — หน้าแอดมินเรียกทุก 15 วินาที)
 - 🛠 `GET /api/admin/bookings/today`
 - 🛠 `GET /api/admin/bookings/history`
 - 🛠 `PATCH /api/admin/bookings/:id/confirm`
