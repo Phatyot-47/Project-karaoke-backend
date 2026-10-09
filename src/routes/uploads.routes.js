@@ -6,7 +6,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { requireLogin } = require('../utils/auth');
 
-// เก็บไฟล์ที่อัปโหลด (สลิปโอนเงิน, รูปห้อง, รูปโปรไฟล์) ไว้ที่ gens-karaoke-backend/uploads
+// เก็บไฟล์ที่อัปโหลด (สลิปโอนเงิน, รูปห้อง, รูปโปรไฟล์) ไว้ที่โฟลเดอร์ uploads/ ของ backend
 // แล้ว serve เป็น static path /uploads/<filename> (ดู app.js)
 const uploadDir = path.join(__dirname, '..', '..', 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });

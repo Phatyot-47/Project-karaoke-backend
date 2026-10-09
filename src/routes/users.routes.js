@@ -3,7 +3,7 @@ const router = require('express').Router();
 const { pool } = require('../db');
 const { HttpError, route } = require('../utils/http');
 const { requireCustomer } = require('../utils/auth');
-const { normalizePhone } = require('../utils/phone');
+const { normalizePhone, checkName, checkPassword } = require('../utils/validate');
 
 // ทุก route ในไฟล์นี้: ต้องล็อกอินเป็นลูกค้า และแก้ได้เฉพาะบัญชีของตัวเอง
 router.use(requireCustomer);
@@ -22,9 +22,8 @@ router.patch(
   route(
     async (req, res) => {
       ownAccountOnly(req);
-      const { name, avatarUrl } = req.body;
-      if (typeof name !== 'string' || !name.trim()) throw new HttpError(400, 'กรุณากรอกชื่อและเบอร์โทรศัพท์ให้ครบถ้วน');
-      if (name.trim().length > 100) throw new HttpError(400, 'ชื่อต้องไม่เกิน 100 ตัวอักษร');
+      const { avatarUrl } = req.body;
+      const name = checkName(req.body.name);
       const phone = normalizePhone(req.body.phone);
       const changeAvatar = avatarUrl !== undefined;
       if (changeAvatar && !isAvatarUrl(avatarUrl)) throw new HttpError(400, 'ลิงก์รูปโปรไฟล์ไม่ถูกต้อง');
@@ -34,7 +33,7 @@ router.patch(
        avatar_url = CASE WHEN $4::boolean THEN NULLIF($5::text, '') ELSE avatar_url END
      WHERE user_id = $1 AND role = 'customer'
      RETURNING user_id, name, phone, avatar_url`,
-          [req.user.id, name.trim(), phone, changeAvatar, avatarUrl || ''],
+          [req.user.id, name, phone, changeAvatar, avatarUrl || ''],
         )
       ).rows[0];
       if (!user) throw new HttpError(404, 'ไม่พบบัญชีผู้ใช้นี้ กรุณาเข้าสู่ระบบใหม่');
@@ -50,9 +49,7 @@ router.patch(
   route(async (req, res) => {
     ownAccountOnly(req);
     const { currentPassword, newPassword } = req.body;
-    if (typeof newPassword !== 'string' || newPassword.length < 6 || newPassword.length > 72) {
-      throw new HttpError(400, 'รหัสผ่านใหม่ต้องมี 6-72 ตัวอักษร');
-    }
+    checkPassword(newPassword, 'รหัสผ่านใหม่');
     const updated = (
       await pool.query(
         `UPDATE users SET password_hash = crypt($3, gen_salt('bf'))

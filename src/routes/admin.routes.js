@@ -908,16 +908,6 @@ async function insertRoom(db, type, roomName) {
   return getAdminRoom(db, room.room_id);
 }
 
-// POST /api/admin/rooms  { typeId, roomName } -- เพิ่มห้องเดียว
-router.post(
-  '/rooms',
-  route(async (req, res) => {
-    const type = await getRoomType(pool, req.body.typeId);
-    const roomName = trimmedText(req.body.roomName, 100, 'ชื่อห้อง') || 'ห้องใหม่';
-    res.status(201).json(await insertRoom(pool, type, roomName));
-  }),
-);
-
 const BULK_MAX_PER_TYPE = 20;
 const BULK_MAX_TOTAL = 50;
 

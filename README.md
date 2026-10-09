@@ -96,8 +96,8 @@ npm run format  # จัดรูปแบบโค้ดด้วย Prettier
 - 🛠 `PATCH /api/admin/policy` `{ depositPercent, cancelHoursBefore, allowEditBeforeHours, refundPolicyDesc, noShowPolicyDesc }`
 - 🛠 `GET /api/admin/room-types` · `POST /api/admin/room-types` `{ code, name, capacityMin, capacityMax, basePricePerHour, description }`
 - 🛠 `PATCH /api/admin/room-types/:id` (ฟิลด์เดียวกัน + `applyToRoomIds` = ห้องธรรมดาที่จะเปลี่ยนเป็นราคาใหม่) · `DELETE /api/admin/room-types/:id`
-- 🛠 `GET /api/admin/rooms` · `POST /api/admin/rooms` `{ typeId, roomName }` · `PATCH /api/admin/rooms/:id` · `DELETE /api/admin/rooms/:id`
-- 🛠 `POST /api/admin/rooms/bulk` `{ items: [{ typeId, count }] }` (เพิ่มห้องธรรมดาหลายห้อง ตั้งชื่อ S-01, S-02 ... ให้อัตโนมัติ)
+- 🛠 `GET /api/admin/rooms` · `PATCH /api/admin/rooms/:id` · `DELETE /api/admin/rooms/:id`
+- 🛠 `POST /api/admin/rooms/bulk` `{ items: [{ typeId, count }] }` (เพิ่มห้องธรรมดาตามประเภท 1 ห้องขึ้นไป ตั้งชื่อ S-01, S-02 ... ให้อัตโนมัติ)
 - 🛠 `GET /api/admin/reports?period=day|week|month`
 
 ## หมายเหตุ

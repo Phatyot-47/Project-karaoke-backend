@@ -4,7 +4,7 @@ const rateLimit = require('express-rate-limit');
 const { pool } = require('../db');
 const { HttpError, route } = require('../utils/http');
 const { signToken } = require('../utils/auth');
-const { normalizePhone } = require('../utils/phone');
+const { normalizePhone, checkName, checkPassword } = require('../utils/validate');
 
 // จำกัดจำนวนครั้ง login/register ต่อ IP กัน brute-force เดารหัสผ่าน
 router.use(
@@ -18,20 +18,6 @@ router.use(
 );
 
 const CUSTOMER_FIELDS = 'user_id, name, phone, avatar_url';
-
-// รหัสผ่านลูกค้า: 6-72 ตัวอักษร (bcrypt ใช้ได้สูงสุด 72 ไบต์) — เก็บเป็น hash ด้วย crypt() + gen_salt('bf') ของ pgcrypto
-function checkPassword(password) {
-  if (typeof password !== 'string' || password.length < 6 || password.length > 72) {
-    throw new HttpError(400, 'รหัสผ่านต้องมี 6-72 ตัวอักษร');
-  }
-  return password;
-}
-
-function checkName(name) {
-  if (typeof name !== 'string' || !name.trim()) throw new HttpError(400, 'กรุณากรอกชื่อ');
-  if (name.trim().length > 100) throw new HttpError(400, 'ชื่อต้องไม่เกิน 100 ตัวอักษร');
-  return name.trim();
-}
 
 // ผลลัพธ์ของการเข้าสู่ระบบลูกค้า = ข้อมูลผู้ใช้ + token (แนบไปกับทุก request ที่ต้องล็อกอิน)
 const withToken = (user, role) => ({ ...user, token: signToken(user.user_id, role) });
@@ -75,7 +61,8 @@ router.post(
     if (user.no_password)
       throw new HttpError(409, 'บัญชีนี้ยังไม่ได้ตั้งรหัสผ่าน กรุณาตั้งรหัสผ่านครั้งแรก', 'PASSWORD_NOT_SET');
     if (!user.password_ok) throw new HttpError(401, 'เบอร์โทรศัพท์หรือรหัสผ่านไม่ถูกต้อง');
-    const { no_password: _n, password_ok: _p, ...profile } = user;
+    // ส่งกลับเฉพาะข้อมูลโปรไฟล์ (ไม่ส่งผลตรวจรหัสผ่านกลับไป)
+    const profile = { user_id: user.user_id, name: user.name, phone: user.phone, avatar_url: user.avatar_url };
     res.json(withToken(profile, 'customer'));
   }),
 );
