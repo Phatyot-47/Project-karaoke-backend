@@ -1,5 +1,5 @@
 -- ============================================================
--- schema.sql — โครงสร้างฐานข้อมูลตั้งต้นของระบบ Gens Karaoke (10 ตาราง)
+-- schema.sql — โครงสร้างฐานข้อมูลตั้งต้นของระบบ Gens Karaoke (11 ตาราง)
 -- ============================================================
 -- ใช้ตอนตั้งค่าเครื่องใหม่ / เพื่อนในกลุ่ม clone โปรเจคไปรัน (ไฟล์นี้รวมทุก migration ใน db/migrations แล้ว
 -- ไม่ต้องรัน migrations ซ้ำ) — export จาก DB ที่ใช้พัฒนาจริงด้วย pg_dump --schema-only
@@ -155,6 +155,43 @@ CREATE SEQUENCE public.extension_extension_id_seq
 --
 
 ALTER SEQUENCE public.extension_extension_id_seq OWNED BY public.extension.extension_id;
+
+
+--
+-- Name: notification; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.notification (
+    notification_id integer NOT NULL,
+    user_id integer NOT NULL,
+    booking_id integer,
+    type character varying(30) NOT NULL,
+    title character varying(200) NOT NULL,
+    message text,
+    is_read boolean DEFAULT false NOT NULL,
+    created_at timestamp without time zone DEFAULT LOCALTIMESTAMP NOT NULL,
+    CONSTRAINT notification_type_check CHECK (((type)::text = ANY ((ARRAY['booking_confirmed'::character varying, 'booking_cancelled'::character varying, 'slip_rejected'::character varying, 'room_changed'::character varying, 'no_show'::character varying, 'payment_expired'::character varying])::text[])))
+);
+
+
+--
+-- Name: notification_notification_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.notification_notification_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: notification_notification_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.notification_notification_id_seq OWNED BY public.notification.notification_id;
 
 
 --
@@ -485,6 +522,13 @@ ALTER TABLE ONLY public.extension ALTER COLUMN extension_id SET DEFAULT nextval(
 
 
 --
+-- Name: notification notification_id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notification ALTER COLUMN notification_id SET DEFAULT nextval('public.notification_notification_id_seq'::regclass);
+
+
+--
 -- Name: payment payment_id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -570,6 +614,14 @@ ALTER TABLE ONLY public.booking
 
 ALTER TABLE ONLY public.extension
     ADD CONSTRAINT extension_pkey PRIMARY KEY (extension_id);
+
+
+--
+-- Name: notification notification_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notification
+    ADD CONSTRAINT notification_pkey PRIMARY KEY (notification_id);
 
 
 --
@@ -706,6 +758,13 @@ CREATE INDEX idx_booking_status ON public.booking USING btree (booking_status);
 
 
 --
+-- Name: notification_user_created_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX notification_user_created_idx ON public.notification USING btree (user_id, created_at DESC);
+
+
+--
 -- Name: booking booking_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -751,6 +810,22 @@ ALTER TABLE ONLY public.extension
 
 ALTER TABLE ONLY public.extension
     ADD CONSTRAINT extension_session_id_fkey FOREIGN KEY (session_id) REFERENCES public.service_session(session_id) ON DELETE CASCADE;
+
+
+--
+-- Name: notification notification_booking_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notification
+    ADD CONSTRAINT notification_booking_id_fkey FOREIGN KEY (booking_id) REFERENCES public.booking(booking_id) ON DELETE CASCADE;
+
+
+--
+-- Name: notification notification_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notification
+    ADD CONSTRAINT notification_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
 
 
 --

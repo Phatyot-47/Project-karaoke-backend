@@ -11,6 +11,7 @@ const { makeCode } = require('../utils/codes');
 const { submittedDepositSql } = require('../utils/deposit');
 const { requireAdmin } = require('../utils/auth');
 const { ROOM_TYPE_COLUMNS, joinRoomType } = require('../utils/roomType');
+const { notifyBookingCustomer } = require('../utils/notify');
 
 // ทุก route ในไฟล์นี้ต้องล็อกอินเป็นแอดมิน — ผู้ทำรายการ (checked_in_by, verified_by ฯลฯ) = แอดมินเจ้าของ token
 router.use(requireAdmin);
@@ -91,15 +92,19 @@ router.get(
 router.patch(
   '/bookings/:id/confirm',
   route(async (req, res) => {
-    const booking = (
-      await pool.query(
-        `UPDATE booking SET booking_status = 'confirmed', updated_at = now()
-     WHERE booking_id = $1 AND booking_status = 'pending' AND end_datetime > LOCALTIMESTAMP
-     RETURNING *`,
-        [req.params.id],
-      )
-    ).rows[0];
-    if (!booking) throw new HttpError(404, 'ไม่พบรายการ สถานะไม่ใช่ pending หรือเลยเวลาของการจองนี้แล้ว');
+    const booking = await withTransaction(async (client) => {
+      const updated = (
+        await client.query(
+          `UPDATE booking SET booking_status = 'confirmed', updated_at = now()
+           WHERE booking_id = $1 AND booking_status = 'pending' AND end_datetime > LOCALTIMESTAMP
+           RETURNING *`,
+          [req.params.id],
+        )
+      ).rows[0];
+      if (!updated) throw new HttpError(404, 'ไม่พบรายการ สถานะไม่ใช่ pending หรือเลยเวลาของการจองนี้แล้ว');
+      await notifyBookingCustomer(client, updated.booking_id, 'booking_confirmed');
+      return updated;
+    });
     res.json(booking);
   }),
 );
@@ -109,16 +114,21 @@ router.patch(
 router.patch(
   '/bookings/:id/reject',
   route(async (req, res) => {
-    const booking = (
-      await pool.query(
-        `UPDATE booking SET booking_status = 'cancelled', cancel_reason = $2, updated_at = now()
-     WHERE booking_id = $1 AND booking_status IN ('pending','confirmed')
-       AND NOT EXISTS (SELECT 1 FROM service_session s WHERE s.booking_id = booking.booking_id)
-     RETURNING *`,
-        [req.params.id, req.body.reason || 'ไม่ระบุเหตุ'],
-      )
-    ).rows[0];
-    if (!booking) throw new HttpError(404, 'ไม่พบรายการ หรือรายการนี้ยกเลิกไม่ได้แล้ว (Check-in แล้ว)');
+    const reason = (typeof req.body.reason === 'string' && req.body.reason.trim()) || 'ไม่ระบุเหตุ';
+    const booking = await withTransaction(async (client) => {
+      const updated = (
+        await client.query(
+          `UPDATE booking SET booking_status = 'cancelled', cancel_reason = $2, updated_at = now()
+           WHERE booking_id = $1 AND booking_status IN ('pending','confirmed')
+             AND NOT EXISTS (SELECT 1 FROM service_session s WHERE s.booking_id = booking.booking_id)
+           RETURNING *`,
+          [req.params.id, reason],
+        )
+      ).rows[0];
+      if (!updated) throw new HttpError(404, 'ไม่พบรายการ หรือรายการนี้ยกเลิกไม่ได้แล้ว (Check-in แล้ว)');
+      await notifyBookingCustomer(client, updated.booking_id, 'booking_cancelled', `เหตุผล: ${reason}`);
+      return updated;
+    });
     res.json(booking);
   }),
 );
@@ -128,20 +138,24 @@ router.patch(
 router.patch(
   '/bookings/:id/no-show',
   route(async (req, res) => {
-    const booking = (
-      await pool.query(
-        `UPDATE booking SET booking_status = 'no_show', cancel_reason = $2, updated_at = now()
-     WHERE booking_id = $1 AND booking_status = 'confirmed' AND start_datetime <= LOCALTIMESTAMP
-       AND NOT EXISTS (SELECT 1 FROM service_session s WHERE s.booking_id = booking.booking_id)
-     RETURNING *`,
-        [
-          req.params.id,
-          (typeof req.body.reason === 'string' && req.body.reason.trim()) || 'ลูกค้าไม่มาใช้บริการตามเวลาที่จอง',
-        ],
-      )
-    ).rows[0];
-    if (!booking)
-      throw new HttpError(409, 'บันทึกไม่มาใช้บริการได้เฉพาะรายการที่ยืนยันแล้ว เลยเวลาเริ่มแล้ว และยังไม่ Check-in');
+    const reason =
+      (typeof req.body.reason === 'string' && req.body.reason.trim()) || 'ลูกค้าไม่มาใช้บริการตามเวลาที่จอง';
+    const booking = await withTransaction(async (client) => {
+      const updated = (
+        await client.query(
+          `UPDATE booking SET booking_status = 'no_show', cancel_reason = $2, updated_at = now()
+           WHERE booking_id = $1 AND booking_status = 'confirmed' AND start_datetime <= LOCALTIMESTAMP
+             AND NOT EXISTS (SELECT 1 FROM service_session s WHERE s.booking_id = booking.booking_id)
+           RETURNING *`,
+          [req.params.id, reason],
+        )
+      ).rows[0];
+      if (!updated) {
+        throw new HttpError(409, 'บันทึกไม่มาใช้บริการได้เฉพาะรายการที่ยืนยันแล้ว เลยเวลาเริ่มแล้ว และยังไม่ Check-in');
+      }
+      await notifyBookingCustomer(client, updated.booking_id, 'no_show', 'มัดจำไม่คืนตามนโยบายของร้าน');
+      return updated;
+    });
     res.json(booking);
   }),
 );
@@ -173,7 +187,7 @@ router.patch(
           await client.query('SELECT room_name FROM room WHERE room_id = $1 AND is_active = true', [newRoomId])
         ).rows[0];
         if (!newRoom) throw new HttpError(404, 'ไม่พบห้องใหม่ หรือห้องปิดให้บริการ');
-        return (
+        const moved = (
           await client.query(
             `UPDATE booking SET
          room_id = $2,
@@ -185,6 +199,9 @@ router.patch(
             [req.params.id, newRoomId, current.room_name, newRoom.room_name],
           )
         ).rows[0];
+        // ข้อความแจ้งเตือนใช้ชื่อห้องใหม่แล้ว (notify อ่านห้องจาก booking หลังอัปเดต)
+        await notifyBookingCustomer(client, moved.booking_id, 'room_changed', `ย้ายจากห้อง ${current.room_name}`);
+        return moved;
       });
       res.json(booking);
     },
@@ -447,6 +464,12 @@ router.patch(
            updated_at = now()
          WHERE booking_id = $1`,
           [verified.booking_id, 'ปฏิเสธสลิป: ' + reason],
+        );
+        await notifyBookingCustomer(
+          client,
+          verified.booking_id,
+          'slip_rejected',
+          `เหตุผล: ${reason} — การจองนี้ถูกยกเลิก`,
         );
       }
       return verified;
