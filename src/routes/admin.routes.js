@@ -130,6 +130,37 @@ router.get(
   }),
 );
 
+// ---- นโยบายมัดจำเมื่อ "ร้าน" ยกเลิกการจอง ----
+// ลูกค้ายกเลิกเอง / ไม่มาใช้บริการ = มัดจำไม่คืน (สลิปที่ค้างตรวจยังตรวจได้ เพื่อยืนยันว่าได้รับเงินจริง)
+// ร้านยกเลิก = สลิปที่ค้างตรวจทั้งหมดไม่ผ่านอัตโนมัติ และร้านคืนเงินที่ลูกค้าโอนมาเองนอกระบบ
+const SHOP_CANCEL_SLIP_REMARK = 'ไม่ผ่าน (การจองถูกยกเลิก)';
+const REFUND_NOTE = 'หากโอนมัดจำมาแล้ว ร้านจะติดต่อคืนเงินให้';
+
+/**
+ * เรียกใน transaction หลังร้านเปลี่ยนการจองเป็น cancelled — คืนค่า true ถ้าลูกค้าเคยโอนเงินมา
+ * (มีสลิปที่ตรวจผ่านแล้ว หรือสลิปที่เพิ่งถูกเปลี่ยนเป็นไม่ผ่าน) ไว้ต่อท้ายแจ้งเตือนว่าร้านจะติดต่อคืนเงิน
+ */
+async function rejectPendingSlipsOnShopCancel(client, bookingId, adminId) {
+  const rejected = await client.query(
+    `UPDATE payment SET payment_status = 'rejected', verified_by = $2, verified_at = now(), remark = $3
+     WHERE booking_id = $1 AND payment_status = 'pending'`,
+    [bookingId, adminId, SHOP_CANCEL_SLIP_REMARK],
+  );
+  // ไม่มีสลิปรอตรวจแล้ว: ตรวจผ่านครบยอด = paid (เงินที่ร้านต้องคืน) / ไม่ครบหรือไม่มี = unpaid
+  const paid = (
+    await client.query(
+      `UPDATE booking SET deposit_status = CASE
+         WHEN (SELECT COALESCE(SUM(amount), 0) FROM payment WHERE booking_id = $1 AND payment_status = 'paid')
+              >= deposit_required AND deposit_required > 0 THEN 'paid'
+         ELSE 'unpaid' END
+       WHERE booking_id = $1
+       RETURNING (SELECT COALESCE(SUM(amount), 0) FROM payment WHERE booking_id = $1 AND payment_status = 'paid') AS paid_sum`,
+      [bookingId],
+    )
+  ).rows[0];
+  return rejected.rowCount > 0 || Number(paid?.paid_sum) > 0;
+}
+
 // PATCH /api/admin/bookings/:id/confirm -- กดปุ่ม "ยืนยัน" (ยืนยันรายการที่เลยเวลาสิ้นสุดไปแล้วไม่ได้)
 router.patch(
   '/bookings/:id/confirm',
@@ -168,7 +199,13 @@ router.patch(
         )
       ).rows[0];
       if (!updated) throw new HttpError(404, 'ไม่พบรายการ หรือรายการนี้ยกเลิกไม่ได้แล้ว (Check-in แล้ว)');
-      await notifyBookingCustomer(client, updated.booking_id, 'booking_cancelled', `เหตุผล: ${reason}`);
+      const hadMoney = await rejectPendingSlipsOnShopCancel(client, updated.booking_id, req.user.id);
+      await notifyBookingCustomer(
+        client,
+        updated.booking_id,
+        'booking_cancelled',
+        `เหตุผล: ${reason}${hadMoney ? ` — ${REFUND_NOTE}` : ''}`,
+      );
       return updated;
     });
     res.json(booking);
@@ -499,6 +536,11 @@ router.patch(
           [verified.booking_id],
         );
       } else {
+        // การจองยังไม่ถูกยกเลิก = ปฏิเสธสลิปครั้งนี้ทำให้ "ร้านยกเลิก" การจอง / ลูกค้ายกเลิกไปเองแล้ว = แค่สลิปไม่ผ่าน
+        const wasActive = ['pending', 'confirmed'].includes(
+          (await client.query('SELECT booking_status FROM booking WHERE booking_id = $1', [verified.booking_id]))
+            .rows[0]?.booking_status,
+        );
         await client.query(
           `UPDATE booking SET deposit_status = 'unpaid',
            booking_status = CASE WHEN booking_status IN ('pending','confirmed') THEN 'cancelled' ELSE booking_status END,
@@ -507,12 +549,20 @@ router.patch(
          WHERE booking_id = $1`,
           [verified.booking_id, 'ปฏิเสธสลิป: ' + reason],
         );
-        await notifyBookingCustomer(
-          client,
-          verified.booking_id,
-          'slip_rejected',
-          `เหตุผล: ${reason} — การจองนี้ถูกยกเลิก`,
-        );
+        let extra = `เหตุผล: ${reason}`;
+        if (wasActive) {
+          // สลิปอื่นที่ยังค้างของการจองนี้ไม่ผ่านไปด้วย
+          await rejectPendingSlipsOnShopCancel(client, verified.booking_id, req.user.id);
+          // เคยมีสลิปที่ตรวจผ่านแล้ว (เช่น มัดจำก่อนลูกค้าแก้ไขการจอง) = ร้านต้องคืนเงินส่วนนั้นให้
+          const paidBefore = (
+            await client.query(
+              `SELECT COALESCE(SUM(amount), 0) AS n FROM payment WHERE booking_id = $1 AND payment_status = 'paid'`,
+              [verified.booking_id],
+            )
+          ).rows[0].n;
+          extra += ' — การจองนี้ถูกยกเลิก' + (Number(paidBefore) > 0 ? ` · ${REFUND_NOTE}` : '');
+        }
+        await notifyBookingCustomer(client, verified.booking_id, 'slip_rejected', extra);
       }
       return verified;
     });
