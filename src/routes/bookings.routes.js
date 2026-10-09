@@ -8,6 +8,7 @@ const { isStartInPast } = require('../utils/time');
 const { submittedDepositSql } = require('../utils/deposit');
 const { requireCustomer, requireLogin } = require('../utils/auth');
 const { ROOM_TYPE_COLUMNS, joinRoomType } = require('../utils/roomType');
+const { LATEST_POLICY_SQL } = require('../utils/shop');
 
 const NOTE_MAX_LENGTH = 300;
 
@@ -98,7 +99,7 @@ router.get(
       await pool.query(
         `SELECT b.*, r.room_name, r.image_url, r.capacity, ${ROOM_TYPE_COLUMNS},
             ${submittedDepositSql('b')} AS paid_amount,
-            COALESCE(p.deposit_percent, (SELECT deposit_percent FROM shop_policy ORDER BY effective_from DESC, policy_id DESC LIMIT 1)) AS deposit_percent
+            COALESCE(p.deposit_percent, (SELECT deposit_percent FROM (${LATEST_POLICY_SQL}) latest)) AS deposit_percent
      FROM booking b JOIN room r ON r.room_id = b.room_id ${joinRoomType('r')}
      LEFT JOIN shop_policy p ON p.policy_id = b.policy_id
      WHERE b.booking_id = $1`,
@@ -241,9 +242,7 @@ router.patch(
                 + make_interval(hours => COALESCE(p.cancel_hours_before, latest.cancel_hours_before, 0)) AS within_window
        FROM booking b
        LEFT JOIN shop_policy p ON p.policy_id = b.policy_id
-       LEFT JOIN LATERAL (
-         SELECT cancel_hours_before FROM shop_policy ORDER BY effective_from DESC, policy_id DESC LIMIT 1
-       ) latest ON true
+       LEFT JOIN LATERAL (${LATEST_POLICY_SQL}) latest ON true
        WHERE b.booking_id = $1
        FOR UPDATE OF b`,
           [req.params.id],
