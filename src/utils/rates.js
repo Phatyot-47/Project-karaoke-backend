@@ -1,10 +1,11 @@
-// พีคไทม์ — ค่าหลักอยู่ในตาราง shop ใช้ทุกวัน
-// วันไหนตั้ง shop_hours.custom_rates = true ใช้พีคไทม์ของวันนั้นแทน (ชื่อคอลัมน์เหมือนกันทั้งสองตาราง)
+// พีคไทม์ (ช่วงเวลาที่คิดค่าบริการเพิ่ม)
+// - ค่าหลักเก็บในตาราง shop → ใช้ทุกวัน
+// - วันไหนแอดมินติ๊ก "กำหนดราคาเอง" (shop_hours.custom_rates = true) → ใช้พีคไทม์ของวันนั้นแทน
 const { pool } = require('../db');
 const { HttpError } = require('./http');
 const { toRange } = require('./pricing');
 
-/** แถวจาก shop หรือ shop_hours → rates ที่ calculateBookingPrice ใช้ */
+/** แถวจากตาราง shop หรือ shop_hours → รูปแบบที่สูตรคิดราคา (utils/pricing.js) ใช้ */
 function ratesFromRow(row) {
   return {
     peakStart: row?.peak_start_time || null,
@@ -13,10 +14,10 @@ function ratesFromRow(row) {
   };
 }
 
-/** พีคไทม์ของวันที่ dateISO ("YYYY-MM-DD") — ใช้ค่าของวันนั้นถ้ากำหนดไว้ ไม่งั้นใช้ค่าหลักของร้าน */
+/** พีคไทม์ของวันที่ dateISO (เช่น "2026-10-12") — ถ้าวันนั้นกำหนดเองใช้ค่าของวันนั้น ไม่งั้นใช้ค่าหลักของร้าน */
 async function getRatesForDate(dateISO, db = pool) {
   const [y, m, d] = dateISO.split('-').map(Number);
-  const dayOfWeek = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  const dayOfWeek = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0 = อาทิตย์ ... 6 = เสาร์
   const row = (
     await db.query(
       `SELECT s.*, h.custom_rates,
@@ -35,13 +36,14 @@ async function getRatesForDate(dateISO, db = pool) {
   });
 }
 
-// เวลาต้องเป็นนาทีที่ 00 หรือ 30 (ระบบคิดราคาทีละช่วง 30 นาที — ตั้ง 18:15 ช่อง 18:00 จะไม่นับเป็นพีค ทำให้ราคาดูไม่ตรง)
+// เวลาต้องลงท้ายด้วย :00 หรือ :30 เท่านั้น (ระบบคิดราคาทีละ 30 นาที ถ้าตั้ง 18:15 ราคาจะดูไม่ตรงกับที่ตั้ง)
 const TIME_RE = /^([01]\d|2[0-3]):(00|30)(:00)?$/;
 
 /**
- * ตรวจพีคไทม์จากฟอร์ม → ค่าที่เก็บลง DB (ชื่อคอลัมน์)
- * input: { peakStartTime, peakEndTime, peakSurcharge } — เริ่มว่าง = ไม่มีพีค / สิ้นสุดว่าง = ถึงร้านปิด
- * label = คำนำหน้าข้อความ error เช่น "วันเสาร์: "
+ * ตรวจพีคไทม์ที่แอดมินกรอกในฟอร์ม → แปลงเป็นค่าที่จะบันทึกลงฐานข้อมูล
+ * input: { peakStartTime, peakEndTime, peakSurcharge }
+ *   เวลาเริ่มว่าง = ไม่มีพีค / เวลาสิ้นสุดว่าง = พีคถึงร้านปิด
+ * label = คำนำหน้าข้อความ error เช่น "วันเสาร์: " (บอกว่าผิดที่วันไหน)
  */
 function parseRates(input, label = '') {
   const time = (v, name) => {
@@ -65,4 +67,4 @@ function parseRates(input, label = '') {
   return r;
 }
 
-module.exports = { ratesFromRow, getRatesForDate, parseRates };
+module.exports = { getRatesForDate, parseRates };
