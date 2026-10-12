@@ -700,12 +700,12 @@ router.patch(
   }),
 );
 
-// จำนวนชั่วโมงในนโยบาย: จำนวนเต็ม 0-72 / allowBlank = ช่องว่างได้ (null)
+// จำนวนชั่วโมงในนโยบาย: 0-72 ทีละครึ่งชั่วโมง (เช่น 1, 1.5, 2) / allowBlank = ช่องว่างได้ (null)
 function policyHours(value, label, allowBlank = false) {
   if (allowBlank && (value === '' || value === null || value === undefined)) return null;
   const n = Number(value);
-  if (value === '' || value === null || !Number.isInteger(n) || n < 0 || n > 72) {
-    throw new HttpError(400, `${label}ต้องเป็นจำนวนเต็ม 0-72 ชั่วโมง`);
+  if (value === '' || value === null || !Number.isInteger(n * 2) || n < 0 || n > 72) {
+    throw new HttpError(400, `${label}ต้องเป็น 0-72 ชั่วโมง ทีละ 0.5 ชั่วโมง`);
   }
   return n;
 }
@@ -721,8 +721,8 @@ router.patch(
     if (b.depositPercent === '' || !Number.isFinite(depositPercent) || depositPercent <= 0 || depositPercent > 100) {
       throw new HttpError(400, 'เปอร์เซ็นต์มัดจำต้องเป็นตัวเลข 0-100');
     }
-    const cancelHours = policyHours(b.cancelHoursBefore, 'ยกเลิกล่วงหน้า');
-    const editHours = policyHours(b.allowEditBeforeHours, 'แก้ไขล่วงหน้า', true);
+    const cancelHours = policyHours(b.cancelHoursBefore, 'การยกเลิกได้ก่อนเวลาเริ่ม ');
+    const editHours = policyHours(b.allowEditBeforeHours, 'แก้ไขการจองได้ก่อนเวลาเริ่ม ', true);
     const text = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 500) : null);
     const policy = await withTransaction(async (client) => {
       await client.query('UPDATE shop_policy SET effective_to = now() WHERE effective_to IS NULL');

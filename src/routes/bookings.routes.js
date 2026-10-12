@@ -141,7 +141,7 @@ router.patch(
               EXISTS (SELECT 1 FROM service_session s WHERE s.booking_id = b.booking_id) AS checked_in,
               COALESCE(p.allow_edit_before_hours, p.cancel_hours_before, 0) AS edit_hours_before,
               b.start_datetime > LOCALTIMESTAMP
-                + make_interval(hours => COALESCE(p.allow_edit_before_hours, p.cancel_hours_before, 0)) AS within_window
+                + COALESCE(p.allow_edit_before_hours, p.cancel_hours_before, 0) * interval '1 hour' AS within_window
        FROM booking b
        JOIN room r ON r.room_id = b.room_id
        LEFT JOIN shop_policy p ON p.policy_id = b.policy_id
@@ -164,7 +164,7 @@ router.patch(
         if (!old.within_window) {
           throw new HttpError(
             409,
-            `แก้ไขได้ล่วงหน้าก่อนเวลาเริ่มอย่างน้อย ${old.edit_hours_before} ชั่วโมงเท่านั้น กรุณาติดต่อร้าน`,
+            `แก้ไขได้ก่อนเวลาเริ่มอย่างน้อย ${Number(old.edit_hours_before)} ชั่วโมงเท่านั้น กรุณาติดต่อร้าน`,
           );
         }
         if (startDatetime.slice(0, 10) !== old.booking_date)
@@ -239,7 +239,7 @@ router.patch(
               EXISTS (SELECT 1 FROM service_session s WHERE s.booking_id = b.booking_id) AS checked_in,
               COALESCE(p.cancel_hours_before, latest.cancel_hours_before, 0) AS cancel_hours_before,
               b.start_datetime > LOCALTIMESTAMP
-                + make_interval(hours => COALESCE(p.cancel_hours_before, latest.cancel_hours_before, 0)) AS within_window
+                + COALESCE(p.cancel_hours_before, latest.cancel_hours_before, 0) * interval '1 hour' AS within_window
        FROM booking b
        LEFT JOIN shop_policy p ON p.policy_id = b.policy_id
        LEFT JOIN LATERAL (${LATEST_POLICY_SQL}) latest ON true
@@ -256,7 +256,7 @@ router.patch(
       if (!found.within_window) {
         throw new HttpError(
           409,
-          `ยกเลิกได้ล่วงหน้าก่อนเวลาเริ่มอย่างน้อย ${found.cancel_hours_before} ชั่วโมงเท่านั้น กรุณาติดต่อร้าน`,
+          `ยกเลิกได้ก่อนเวลาเริ่มอย่างน้อย ${Number(found.cancel_hours_before)} ชั่วโมงเท่านั้น กรุณาติดต่อร้าน`,
         );
       }
       return (
