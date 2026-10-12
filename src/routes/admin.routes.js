@@ -721,7 +721,7 @@ router.patch(
     if (b.depositPercent === '' || !Number.isFinite(depositPercent) || depositPercent <= 0 || depositPercent > 100) {
       throw new HttpError(400, 'เปอร์เซ็นต์มัดจำต้องเป็นตัวเลข 0-100');
     }
-    const cancelHours = policyHours(b.cancelHoursBefore, 'การยกเลิกได้ก่อนเวลาเริ่ม ');
+    const cancelHours = policyHours(b.cancelHoursBefore, 'ยกเลิกได้ก่อนเวลาเริ่ม ');
     const editHours = policyHours(b.allowEditBeforeHours, 'แก้ไขการจองได้ก่อนเวลาเริ่ม ', true);
     const text = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 500) : null);
     const policy = await withTransaction(async (client) => {
