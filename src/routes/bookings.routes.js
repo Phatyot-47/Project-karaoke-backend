@@ -37,8 +37,8 @@ router.post(
           `INSERT INTO booking (
        booking_code, customer_id, room_id, policy_id, booking_source,
        booking_date, start_datetime, end_datetime, guest_count, booking_status,
-       base_price, peak_surcharge_total, price_total, deposit_required, deposit_status, note
-     ) VALUES ($1,$2,$3,$4,'customer_online',$5,$6,$7,$8,'pending',$9,$10,$11,$12,'unpaid',$13)
+       base_price, peak_surcharge_total, price_total, deposit_required, deposit_status, note, offpeak_discount_total
+     ) VALUES ($1,$2,$3,$4,'customer_online',$5,$6,$7,$8,'pending',$9,$10,$11,$12,'unpaid',$13,$14)
      RETURNING *`,
           [
             q.bookingCode,
@@ -54,6 +54,7 @@ router.post(
             q.priceTotal,
             q.depositRequired,
             note || null,
+            q.offPeakDiscountTotal,
           ],
         )
       ).rows[0];
@@ -196,7 +197,7 @@ router.patch(
           await client.query(
             `UPDATE booking SET
          room_id = $2, start_datetime = $3, end_datetime = $4,
-         base_price = $5, peak_surcharge_total = $6, price_total = $7, deposit_required = $8,
+         base_price = $5, peak_surcharge_total = $6, price_total = $7, deposit_required = $8, offpeak_discount_total = $11,
          booking_status = CASE WHEN $9 THEN 'pending' ELSE booking_status END,
          deposit_status = CASE WHEN $9 THEN 'unpaid' ELSE deposit_status END,
          note = concat_ws(E'\\n', note, '[ลูกค้าแก้ไข ' || to_char(LOCALTIMESTAMP, 'YYYY-MM-DD HH24:MI') || '] ' || $10::text),
@@ -214,6 +215,7 @@ router.patch(
               depositRequired,
               topUp > 0,
               change,
+              q.offPeakDiscountTotal,
             ],
           )
         ).rows[0];

@@ -94,6 +94,7 @@ CREATE TABLE public.booking (
     created_at timestamp without time zone DEFAULT now() NOT NULL,
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
     cancelled_by character varying(10),
+    offpeak_discount_total numeric(10,2) DEFAULT 0 NOT NULL,
     CONSTRAINT booking_cancelled_by_check CHECK (((cancelled_by)::text = ANY ((ARRAY['customer'::character varying, 'shop'::character varying, 'system'::character varying])::text[]))),
     CONSTRAINT booking_check CHECK ((end_datetime > start_datetime)),
     CONSTRAINT booking_check1 CHECK (((customer_id IS NOT NULL) OR (walkin_name IS NOT NULL))),
@@ -372,7 +373,11 @@ CREATE TABLE public.shop (
     created_at timestamp without time zone DEFAULT now() NOT NULL,
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
     qr_code_url text,
-    floor_plan_url text
+    floor_plan_url text,
+    peak_end_time time without time zone,
+    offpeak_start_time time without time zone,
+    offpeak_end_time time without time zone,
+    offpeak_discount numeric(10,2) DEFAULT 0 NOT NULL
 );
 
 
@@ -386,6 +391,13 @@ CREATE TABLE public.shop_hours (
     day_of_week smallint NOT NULL,
     open_hour smallint NOT NULL,
     close_hour smallint NOT NULL,
+    custom_rates boolean DEFAULT false NOT NULL,
+    peak_start_time time without time zone,
+    peak_end_time time without time zone,
+    peak_surcharge numeric(10,2) DEFAULT 0 NOT NULL,
+    offpeak_start_time time without time zone,
+    offpeak_end_time time without time zone,
+    offpeak_discount numeric(10,2) DEFAULT 0 NOT NULL,
     CONSTRAINT shop_hours_close_hour_check CHECK (((close_hour >= 0) AND (close_hour <= 24))),
     CONSTRAINT shop_hours_day_of_week_check CHECK (((day_of_week >= 0) AND (day_of_week <= 6))),
     CONSTRAINT shop_hours_open_hour_check CHECK (((open_hour >= 0) AND (open_hour <= 24)))
