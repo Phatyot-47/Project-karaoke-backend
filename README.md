@@ -92,8 +92,8 @@ npm run format  # จัดรูปแบบโค้ดด้วย Prettier
 - 🛠 `PATCH /api/admin/bookings/:id/extend` `{ minutes }` (ทีละ 30 นาที)
 - 🛠 `PATCH /api/admin/bookings/:id/check-out`
 - 🛠 `PATCH /api/admin/payments/:id/verify` `{ approve, reason }`
-- 🛠 `PATCH /api/admin/shop` `{ name, taxId, phone, address, bankName, bankAccountNo, bankAccountName, qrCodeUrl, floorPlanUrl, peakStartTime, peakEndTime, peakSurcharge, offPeakStartTime, offPeakEndTime, offPeakDiscount }` (ราคาตามช่วงเวลาที่ใช้ทุกวัน)
-- 🛠 `PATCH /api/admin/shop/hours` `{ hours: [{ dayOfWeek, openHour, closeHour, customRates, ...ราคาตามช่วงเวลาของวันนั้น }] }`
+- 🛠 `PATCH /api/admin/shop` `{ name, taxId, phone, address, bankName, bankAccountNo, bankAccountName, qrCodeUrl, floorPlanUrl, peakStartTime, peakEndTime, peakSurcharge }` (พีคไทม์ที่ใช้ทุกวัน)
+- 🛠 `PATCH /api/admin/shop/hours` `{ hours: [{ dayOfWeek, openHour, closeHour, customRates, ...พีคไทม์ของวันนั้น }] }`
 - 🛠 `PATCH /api/admin/policy` `{ depositPercent, cancelHoursBefore, allowEditBeforeHours, refundPolicyDesc, noShowPolicyDesc }`
 - 🛠 `GET /api/admin/room-types` · `POST /api/admin/room-types` `{ code, name, capacityMin, capacityMax, basePricePerHour, description }`
 - 🛠 `PATCH /api/admin/room-types/:id` (ฟิลด์เดียวกัน + `applyToRoomIds` = ห้องธรรมดาที่จะเปลี่ยนเป็นราคาใหม่) · `DELETE /api/admin/room-types/:id`
@@ -111,4 +111,4 @@ npm run format  # จัดรูปแบบโค้ดด้วย Prettier
 - ประเภทห้อง (room_type) มีราคาห้องธรรมดา — ห้องใหม่ใช้ราคานี้ เปลี่ยนราคาประเภทแล้วแอดมินเลือกได้ว่าห้องธรรมดาห้องไหนเปลี่ยนตาม ส่วนห้องธีม (`room.theme` ไม่ว่าง) แอดมินตั้งราคาเองรายห้อง
 - นโยบายมัดจำ: ลูกค้ายกเลิกเอง/ไม่มาใช้บริการ = ร้านเก็บมัดจำ (นับเป็นรายได้ในรายงาน) / ร้านยกเลิก = สลิปที่ค้างตรวจไม่ผ่านอัตโนมัติ ร้านคืนเงินนอกระบบ (`booking.cancelled_by`)
 - ลิงก์ไฟล์ที่อัปโหลดเก็บเป็น `/uploads/...` (ไม่ผูกชื่อเครื่อง) หน้าเว็บเติมที่อยู่ backend ให้เอง
-- ราคาตามช่วงเวลา: คิดทีละ 30 นาที ช่วงพีค +ค่าบริการ / ช่วงออฟพีค -ส่วนลด (บาท/ชม.) ตั้งค่าหลักใช้ทุกวัน หรือกำหนดเองรายวัน (`src/utils/rates.js`, `src/utils/pricing.js` — สูตรเดียวกับ `src/utils/pricing.js` ฝั่งหน้าเว็บ)
+- พีคไทม์: คิดทีละ 30 นาที ช่วงพีค +ค่าบริการ (บาท/ชม.) ตั้งค่าหลักใช้ทุกวัน หรือกำหนดเองรายวัน (`src/utils/rates.js`, `src/utils/pricing.js` — สูตรเดียวกับ `src/utils/pricing.js` ฝั่งหน้าเว็บ)

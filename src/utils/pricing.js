@@ -1,6 +1,5 @@
 // คำนวณราคาการจอง โดยแบ่งเป็นช่วงละ 30 นาที (สูตรเดียวกับ src/utils/pricing.js ฝั่งหน้าเว็บ ที่ใช้พรีวิวราคา)
-// ช่วงพีค = ราคาห้อง + ค่าบริการเพิ่ม / ช่วงออฟพีค = ราคาห้อง - ส่วนลด / นอกนั้น = ราคาห้อง
-// ดูว่าช่วง 30 นาทีไหนอยู่พีค/ออฟพีค จาก "เวลาเริ่ม" ของช่วงนั้น
+// ช่วงพีค = ราคาห้อง + ค่าบริการเพิ่ม / นอกนั้น = ราคาห้อง — ดูว่าช่วง 30 นาทีไหนอยู่พีคจาก "เวลาเริ่ม" ของช่วงนั้น
 
 /** "HH:MM" หรือ "HH:MM:SS" → นาทีนับจากเที่ยงคืน (ไม่มีค่า = null) */
 function toMinutes(time) {
@@ -9,7 +8,7 @@ function toMinutes(time) {
   return h * 60 + (m || 0);
 }
 
-/** ช่วง [start, end) ในหน่วยนาที — ไม่มีเวลาเริ่ม = ไม่มีช่วงนี้ / ไม่มีเวลาสิ้นสุด = ถึงเที่ยงคืน (ร้านปิด) */
+/** ช่วงพีค [start, end) ในหน่วยนาที — ไม่มีเวลาเริ่ม = ไม่มีพีค / ไม่มีเวลาสิ้นสุด = ถึงเที่ยงคืน (ร้านปิด) */
 function toRange(start, end) {
   const s = toMinutes(start);
   if (s === null) return null;
@@ -17,8 +16,8 @@ function toRange(start, end) {
 }
 
 /**
- * @param {object} rates { peakStart, peakEnd, peakSurcharge, offPeakStart, offPeakEnd, offPeakDiscount } (ดู utils/rates.js)
- * @returns {{ basePrice, peakSurchargeTotal, offPeakDiscountTotal, priceTotal }}
+ * @param {object} rates { peakStart, peakEnd, peakSurcharge } (ดู utils/rates.js)
+ * @returns {{ basePrice, peakSurchargeTotal, priceTotal }}
  */
 function calculateBookingPrice({ pricePerHour, rates, startDatetime, endDatetime }) {
   const start = new Date(startDatetime);
@@ -33,27 +32,17 @@ function calculateBookingPrice({ pricePerHour, rates, startDatetime, endDatetime
   }
 
   const peak = toRange(rates?.peakStart, rates?.peakEnd);
-  const offPeak = toRange(rates?.offPeakStart, rates?.offPeakEnd);
-  const inRange = (range, minutes) => range && minutes >= range[0] && minutes < range[1];
-
   let peakHalfSlots = 0;
-  let offPeakHalfSlots = 0;
   const cursor = new Date(start);
   for (let i = 0; i < totalMinutes / 30; i++) {
     const minutesOfDay = cursor.getHours() * 60 + cursor.getMinutes();
-    if (inRange(peak, minutesOfDay)) peakHalfSlots++;
-    else if (inRange(offPeak, minutesOfDay)) offPeakHalfSlots++;
+    if (peak && minutesOfDay >= peak[0] && minutesOfDay < peak[1]) peakHalfSlots++;
     cursor.setMinutes(cursor.getMinutes() + 30);
   }
 
-  // ส่วนลดไม่เกินราคาห้อง (กันราคาช่วงออฟพีคติดลบ)
-  const discountPerHour = Math.min(Number(rates?.offPeakDiscount || 0), pricePerHour);
   const basePrice = Math.round((pricePerHour * totalMinutes) / 60);
   const peakSurchargeTotal = Math.round(Number(rates?.peakSurcharge || 0) * 0.5 * peakHalfSlots);
-  const offPeakDiscountTotal = Math.round(discountPerHour * 0.5 * offPeakHalfSlots);
-  const priceTotal = basePrice + peakSurchargeTotal - offPeakDiscountTotal;
-
-  return { basePrice, peakSurchargeTotal, offPeakDiscountTotal, priceTotal };
+  return { basePrice, peakSurchargeTotal, priceTotal: basePrice + peakSurchargeTotal };
 }
 
 module.exports = { calculateBookingPrice, toMinutes, toRange };
