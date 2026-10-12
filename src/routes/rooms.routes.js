@@ -1,5 +1,5 @@
-// API ข้อมูลห้อง (/api/rooms/...) — รายการห้อง, ค้นหาห้องว่างตามเวลา, ช่วงเวลาที่ถูกจองแล้ว
-// (ไม่ต้องล็อกอินก็ดูได้)
+// API ข้อมูลห้องสำหรับลูกค้า (/api/rooms/...) — ไม่ต้องล็อกอินก็ดูได้
+// มี: รายการห้อง (กรองประเภท/ค้นหาห้องว่างได้), รายละเอียดห้องเดียว, ช่วงเวลาที่ถูกจองไปแล้วของห้อง
 const router = require('express').Router();
 const { pool } = require('../db');
 const { HttpError, route } = require('../utils/http');
@@ -8,8 +8,8 @@ const { expireStalePendingBookings } = require('../utils/expireBookings');
 const { ROOM_TYPE_COLUMNS, joinRoomType } = require('../utils/roomType');
 
 // GET /api/rooms?size=S&start=YYYY-MM-DDTHH:MM:SS&end=...  -- หน้า "เลือกห้องคาราโอเกะ"
-// size = รหัสประเภทห้อง (room_type.code) ไม่ส่ง/all = ทุกประเภท
-// ถ้าส่ง start/end มาด้วย จะมีฟิลด์ is_available บอกว่าห้องว่างตลอดช่วงเวลานั้นหรือไม่ (ค้นหาห้องว่างตามเวลา/ระยะเวลา)
+// size = รหัสประเภทห้อง เช่น S, M (ไม่ส่ง หรือ all = ทุกประเภท)
+// ถ้าส่ง start/end มาด้วย แต่ละห้องจะมี is_available = ว่างตลอดช่วงเวลานั้นไหม (ใช้กับปุ่มค้นหาห้องว่าง)
 router.get(
   '/',
   route(async (req, res) => {
@@ -37,7 +37,7 @@ router.get(
       params.push(String(size).toUpperCase());
       sql += ` AND t.code = $${params.length}`;
     }
-    // เรียงตามประเภท (เล็ก → ใหญ่) แล้วตามราคา
+    // เรียงตามประเภท (เล็ก → ใหญ่) แล้วตามราคา (ถูก → แพง)
     res.json((await pool.query(`${sql} ORDER BY t.capacity_min, t.code, r.price_per_hour, r.room_name`, params)).rows);
   }),
 );
@@ -56,7 +56,7 @@ router.get(
   }),
 );
 
-// GET /api/rooms/:id/availability?date=YYYY-MM-DD -- ช่วงเวลาที่ถูกจองแล้ว (หน้าเลือกเวลา)
+// GET /api/rooms/:id/availability?date=YYYY-MM-DD -- ช่วงเวลาที่ถูกจองแล้วของห้องนี้ (หน้าเลือกเวลาจะทำช่องนั้นเป็นสีเทา)
 router.get(
   '/:id/availability',
   route(async (req, res) => {

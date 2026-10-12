@@ -4,7 +4,7 @@ const router = require('express').Router();
 const { pool } = require('../db');
 const { route } = require('../utils/http');
 
-// GET /api/room-types -- ทุกประเภท + จำนวนห้องที่เปิดให้บริการ + ราคาเริ่มต้นจริงของห้องในประเภทนั้น
+// GET /api/room-types -- ทุกประเภท + จำนวนห้องที่เปิดอยู่ + ราคาถูกสุดของห้องในประเภทนั้น (ไว้โชว์ "เริ่มต้น ... บาท")
 router.get(
   '/',
   route(async (req, res) => {

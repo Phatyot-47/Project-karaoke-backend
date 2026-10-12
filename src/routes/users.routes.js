@@ -1,17 +1,17 @@
-// API ข้อมูลส่วนตัวลูกค้า (/api/users/...) — แก้ชื่อ/เบอร์/รูปโปรไฟล์ และเปลี่ยนรหัสผ่าน
+// API หน้า "ข้อมูลส่วนตัว" ของลูกค้า (/api/users/...) — แก้ชื่อ/เบอร์/รูปโปรไฟล์ และเปลี่ยนรหัสผ่าน
 const router = require('express').Router();
 const { pool } = require('../db');
 const { HttpError, route } = require('../utils/http');
 const { requireCustomer } = require('../utils/auth');
 const { normalizePhone, checkName, checkPassword } = require('../utils/validate');
 
-// ทุก route ในไฟล์นี้: ต้องล็อกอินเป็นลูกค้า และแก้ได้เฉพาะบัญชีของตัวเอง
+// ทุก route ในไฟล์นี้: ต้องล็อกอินเป็นลูกค้า และแก้ได้เฉพาะบัญชีของตัวเอง (เลขบัญชีใน URL ต้องตรงกับคนที่ล็อกอิน)
 router.use(requireCustomer);
 const ownAccountOnly = (req) => {
   if (Number(req.params.id) !== req.user.id) throw new HttpError(403, 'แก้ไขได้เฉพาะข้อมูลของตัวเอง');
 };
 
-// avatarUrl ที่ยอมรับ: null / '' (ลบรูป) หรือลิงก์ http(s) / path ที่ได้จาก POST /api/uploads
+// ลิงก์รูปโปรไฟล์ที่รับได้: null หรือ '' (= ลบรูป) / ลิงก์ http(s) / ลิงก์ /uploads/... ที่ได้จากการอัปโหลด
 const isAvatarUrl = (url) =>
   url === null || url === '' || (typeof url === 'string' && url.length <= 500 && /^(https?:\/\/|\/)/.test(url));
 
@@ -43,7 +43,7 @@ router.patch(
   ),
 );
 
-// PATCH /api/users/:id/password  { currentPassword, newPassword }  -- เปลี่ยนรหัสผ่าน (ต้องยืนยันรหัสเดิม)
+// PATCH /api/users/:id/password  { currentPassword, newPassword }  -- เปลี่ยนรหัสผ่าน (ต้องกรอกรหัสเดิมให้ถูกก่อน)
 router.patch(
   '/:id/password',
   route(async (req, res) => {

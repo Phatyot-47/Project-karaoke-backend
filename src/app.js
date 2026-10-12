@@ -1,5 +1,6 @@
-// ตั้งค่า Express app: middleware, เส้นทาง API ทั้งหมด (/api/...) และตัวจัดการ error กลาง
-// (แยกจาก server.js เพื่อให้เอาไปใช้ทดสอบได้โดยไม่ต้องเปิดพอร์ตจริง)
+// ตั้งค่าตัวเว็บเซิร์ฟเวอร์ (Express) — รวมทุกเส้นทาง API (/api/...) ไว้ที่นี่
+// ลำดับการทำงานเมื่อมีคำขอเข้ามา: อ่านข้อมูล JSON → ส่งไปไฟล์ route ที่ตรงกับ URL → ถ้ามี error ส่งไปตัวจัดการ error ด้านล่างสุด
+// (แยกจาก server.js เพื่อให้ไฟล์ทดสอบเรียกใช้ app ได้โดยไม่ต้องเปิดพอร์ตจริง)
 const path = require('path');
 const express = require('express');
 const cors = require('cors');
@@ -17,13 +18,13 @@ const roomTypesRoutes = require('./routes/roomTypes.routes');
 const notificationsRoutes = require('./routes/notifications.routes');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+app.use(cors()); // อนุญาตให้หน้าเว็บ (คนละพอร์ต เช่น 5173) เรียก API นี้ได้
+app.use(express.json()); // แปลงข้อมูล JSON ที่ส่งมาให้อ่านได้จาก req.body
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
-// ไฟล์ที่อัปโหลด (สลิปโอนเงิน, รูปห้อง) — serve เป็น static ตรงๆ จาก /uploads/<filename>
-// nosniff + CSP กันไม่ให้ไฟล์ถูกตีความเป็นหน้าเว็บ/สคริปต์ (แม้จะหลุดมาเป็นไฟล์ที่ไม่ใช่รูป)
+// รูปที่อัปโหลด (สลิป, รูปห้อง, รูปโปรไฟล์) เปิดดูได้ที่ /uploads/<ชื่อไฟล์>
+// ใส่ header กันความปลอดภัย: ให้เบราว์เซอร์ถือว่าเป็น "รูป" เท่านั้น ห้ามรันเป็นหน้าเว็บหรือสคริปต์
 app.use(
   '/uploads',
   express.static(path.join(__dirname, '..', 'uploads'), {
@@ -34,6 +35,7 @@ app.use(
   }),
 );
 
+// จับคู่ URL กับไฟล์ route: เช่น /api/bookings/... ไปที่ routes/bookings.routes.js
 app.use('/api/auth', authRoutes);
 app.use('/api/rooms', roomsRoutes);
 app.use('/api/bookings', bookingsRoutes);
@@ -45,16 +47,18 @@ app.use('/api/shop', shopRoutes);
 app.use('/api/room-types', roomTypesRoutes);
 app.use('/api/notifications', notificationsRoutes);
 
+// URL ที่ไม่มีในระบบ → ตอบ 404
 app.use((req, res) => {
   res.status(404).json({ error: 'ไม่พบ endpoint นี้' });
 });
 
-// error code ของ PostgreSQL ที่เกิดจาก "ข้อมูลที่ส่งมาผิดรูปแบบ" ไม่ใช่ระบบพัง → ควรตอบ 400 ไม่ใช่ 500
-// 22P02 = แปลงชนิดข้อมูลไม่ได้ (เช่น /api/rooms/abc), 22007/22008 = วันที่-เวลาผิดรูปแบบ/เกินช่วง,
-// 22003 = ตัวเลขเกินขนาดคอลัมน์, 23514 = ผิด CHECK constraint (เช่น size ห้องไม่ใช่ S/M/L/XL)
+// รหัส error ของฐานข้อมูลที่แปลว่า "ข้อมูลที่ส่งมาผิดรูปแบบ" (ความผิดของผู้ส่ง ไม่ใช่ระบบพัง) → ตอบ 400
+// 22P02 = ชนิดข้อมูลผิด เช่น /api/rooms/abc, 22007/22008 = วันที่-เวลาผิด,
+// 22003 = ตัวเลขใหญ่เกิน, 23514 = ผิดเงื่อนไขที่ตั้งไว้ในตาราง (CHECK)
 const PG_BAD_INPUT_CODES = ['22P02', '22007', '22008', '22003', '23514'];
 
-// error handler กลาง: HttpError ตอบตาม status ของมัน / JSON body ผิดรูปแบบตอบ 400 / อื่นๆ log แล้วตอบ 500
+// ตัวจัดการ error กลาง — ทุก error ในระบบมาจบที่นี่
+// HttpError (error ที่เราโยนเองพร้อมข้อความ) ตอบตามนั้น / JSON พัง ตอบ 400 / นอกนั้นพิมพ์ลง log แล้วตอบ 500
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   if (err instanceof HttpError)

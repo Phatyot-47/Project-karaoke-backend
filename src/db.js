@@ -1,13 +1,11 @@
-// เชื่อมต่อ PostgreSQL ด้วย connection pool + ฟังก์ชันช่วยรันคำสั่งหลายอันใน transaction เดียว
+// การเชื่อมต่อฐานข้อมูล PostgreSQL — ไฟล์อื่นใช้ pool.query(...) ส่งคำสั่ง SQL ผ่านตัวนี้
+// pool = "กลุ่มการเชื่อมต่อ" ที่เปิดค้างไว้ใช้ซ้ำ ไม่ต้องเปิด-ปิดใหม่ทุกครั้ง (เร็วกว่า)
 require('dotenv').config();
 const { Pool, types } = require('pg');
 
-// DATE (1082) และ TIMESTAMP WITHOUT TIME ZONE (1114) ไม่มี timezone marker ในตัวเอง
-// แต่ pg parser ค่า default จะ fallback ไปสร้าง JS Date ผ่าน constructor แบบ local time
-// (new Date(year, month, day, ...)) ทำให้ผลลัพธ์ขึ้นกับ TZ ของเครื่องที่รัน Node process
-// (ถูกโดยบังเอิญเมื่อรันที่ TZ Asia/Bangkok แต่จะเพี้ยนทันทีถ้า deploy ไปเครื่องที่ TZ อื่น เช่น UTC)
-// ทั้งสองคอลัมน์ในระบบนี้ตั้งใจเก็บ "เวลาไทยแบบ naive" อยู่แล้ว (ดู src/utils/time.js) จึง
-// return string ดิบจาก DB ตรงๆ แทน ไม่ผ่าน Date object เลย เพื่อไม่ให้ผลลัพธ์ขึ้นกับ TZ ของเครื่อง
+// วันที่ (DATE) และวันเวลา (TIMESTAMP) ในระบบนี้เก็บเป็น "เวลาไทย" อยู่แล้ว
+// ถ้าปล่อยให้ไลบรารีแปลงเป็น Date ของ JavaScript เวลาจะเพี้ยนตาม timezone ของเครื่องที่รัน
+// จึงให้คืนค่าเป็นข้อความตรงๆ เช่น "2026-10-12" และ "2026-10-12T20:00:00" (เปลี่ยนช่องว่างเป็นตัว T)
 types.setTypeParser(types.builtins.DATE, (val) => val);
 types.setTypeParser(types.builtins.TIMESTAMP, (val) => (val ? val.replace(' ', 'T') : val));
 
@@ -20,8 +18,11 @@ pool.on('error', (err) => {
 });
 
 /**
- * รัน fn(client) ใน transaction เดียว — สำเร็จ COMMIT / มี error ROLLBACK แล้วโยนต่อ
- * (fn โยน HttpError เพื่อยกเลิก transaction พร้อมตอบ error ได้เลย) และคืน connection เข้า pool เสมอ
+ * รันหลายคำสั่ง SQL แบบ "ทั้งหมดหรือไม่เลย" (transaction)
+ * เช่น ยืนยันการจอง + สร้างแจ้งเตือน: ถ้าอันไหนพัง ระบบจะย้อนคืนทุกอย่าง ไม่มีข้อมูลค้างครึ่งๆ กลางๆ
+ * วิธีใช้: withTransaction(async (client) => { await client.query(...); ... })
+ * - ทำครบไม่มี error → บันทึกจริง (COMMIT)
+ * - มี error ตรงไหน → ยกเลิกทั้งหมด (ROLLBACK) แล้วส่ง error ต่อ
  */
 async function withTransaction(fn) {
   const client = await pool.connect();
@@ -34,7 +35,7 @@ async function withTransaction(fn) {
     await client.query('ROLLBACK').catch(() => {});
     throw err;
   } finally {
-    client.release();
+    client.release(); // คืนการเชื่อมต่อให้ pool ทุกครั้ง ไม่ว่าสำเร็จหรือไม่
   }
 }
 

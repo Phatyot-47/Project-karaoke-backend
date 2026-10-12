@@ -1,20 +1,23 @@
-// ระบบ token (JWT) — สร้าง token ตอนล็อกอิน และ middleware ตรวจสิทธิ์ลูกค้า/แอดมิน
+// ระบบล็อกอินด้วย token (JWT)
+// ล็อกอินสำเร็จ → ระบบออก "token" (เหมือนบัตรผ่าน) ให้หน้าเว็บเก็บไว้ แล้วแนบมากับทุกคำขอที่ต้องล็อกอิน
+// ไฟล์นี้มี 2 อย่าง: สร้าง token และ ตัวตรวจบัตรผ่าน (requireCustomer / requireAdmin / requireLogin)
 require('dotenv').config();
 const jwt = require('jsonwebtoken');
 const { HttpError } = require('./http');
 
-// รหัสลับสำหรับเซ็น token — ไม่มีไม่ให้ server เริ่มทำงาน (กันลืมตั้งค่าแล้วใช้ค่าที่เดาได้)
+// รหัสลับที่ใช้เซ็น token — ถ้าลืมตั้งใน .env จะไม่ยอมเปิดเซิร์ฟเวอร์ (กันใช้รหัสที่คนอื่นเดาได้)
 const SECRET = process.env.JWT_SECRET;
 if (!SECRET) throw new Error('ยังไม่ได้ตั้งค่า JWT_SECRET ใน .env (ดูตัวอย่างใน .env.example)');
-const TOKEN_TTL = '12h';
+const TOKEN_TTL = '12h'; // token ใช้ได้ 12 ชั่วโมง หลังจากนั้นต้องล็อกอินใหม่
 
-/** token เข้าสู่ระบบ: ข้างในมีแค่ user_id + role เซ็นด้วย JWT_SECRET (แก้ไข/ปลอมไม่ได้ถ้าไม่มีรหัสลับ) */
+/** สร้าง token: ข้างในมีแค่รหัสผู้ใช้ + บทบาท (ลูกค้า/แอดมิน) และเซ็นด้วยรหัสลับ คนอื่นแก้หรือปลอมไม่ได้ */
 const signToken = (userId, role) => jwt.sign({ sub: String(userId), role }, SECRET, { expiresIn: TOKEN_TTL });
 
 /**
- * middleware ตรวจ header "Authorization: Bearer <token>" แล้วใส่ req.user = { id, role }
- * roles: role ที่อนุญาต (ไม่ระบุ = ล็อกอินแล้วเป็นใครก็ได้)
- * ไม่มี/หมดอายุ/ปลอม token → 401 / role ไม่ตรง → 403
+ * ตัวตรวจบัตรผ่าน — วางไว้หน้า route ที่ต้องล็อกอิน
+ * อ่าน header "Authorization: Bearer <token>" แล้วเก็บผู้ใช้ไว้ที่ req.user = { id, role }
+ * roles = บทบาทที่อนุญาต (ไม่ใส่ = ล็อกอินแล้วใครก็ได้)
+ * ไม่มี token / หมดอายุ / ปลอม → 401 (ให้ล็อกอินใหม่) · บทบาทไม่ตรง → 403 (ไม่มีสิทธิ์)
  */
 function authenticate(...roles) {
   return (req, res, next) => {
@@ -34,7 +37,7 @@ function authenticate(...roles) {
 
 module.exports = {
   signToken,
-  requireCustomer: authenticate('customer'),
-  requireAdmin: authenticate('admin'),
-  requireLogin: authenticate('customer', 'admin'),
+  requireCustomer: authenticate('customer'), // ลูกค้าเท่านั้น
+  requireAdmin: authenticate('admin'), // แอดมินเท่านั้น
+  requireLogin: authenticate('customer', 'admin'), // ลูกค้าหรือแอดมินก็ได้
 };
