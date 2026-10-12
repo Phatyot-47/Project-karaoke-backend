@@ -13,6 +13,7 @@ const { requireAdmin } = require('../utils/auth');
 const { ROOM_TYPE_COLUMNS, joinRoomType } = require('../utils/roomType');
 const { notifyBookingCustomer } = require('../utils/notify');
 const { normalizePhone } = require('../utils/validate');
+const { parseRates, checkDiscountBelowRoomPrices, maxOffPeakDiscount } = require('../utils/rates');
 
 // ทุก route ในไฟล์นี้ต้องล็อกอินเป็นแอดมิน — ผู้ทำรายการ (checked_in_by, verified_by ฯลฯ) = แอดมินเจ้าของ token
 router.use(requireAdmin);
@@ -636,67 +637,84 @@ router.patch(
  * ตั้งค่าร้าน (หน้า "ตั้งค่าร้าน")
  * ========================================================== */
 
-// PATCH /api/admin/shop
+// ชื่อฟิลด์ราคาตามช่วงเวลาจากฟอร์ม (พีค / ออฟพีค)
+const RATE_KEYS = [
+  'peakStartTime',
+  'peakEndTime',
+  'peakSurcharge',
+  'offPeakStartTime',
+  'offPeakEndTime',
+  'offPeakDiscount',
+];
+// แถวจาก DB → ค่าแบบฟอร์ม (ใช้เติมค่าที่ไม่ได้ส่งมา)
+const rateFormFromRow = (row) => ({
+  peakStartTime: row.peak_start_time ? String(row.peak_start_time).slice(0, 5) : '',
+  peakEndTime: row.peak_end_time ? String(row.peak_end_time).slice(0, 5) : '',
+  peakSurcharge: row.peak_surcharge,
+  offPeakStartTime: row.offpeak_start_time ? String(row.offpeak_start_time).slice(0, 5) : '',
+  offPeakEndTime: row.offpeak_end_time ? String(row.offpeak_end_time).slice(0, 5) : '',
+  offPeakDiscount: row.offpeak_discount,
+});
+
+// PATCH /api/admin/shop -- ข้อมูลร้าน + ราคาตามช่วงเวลาที่ใช้ทุกวัน (ฟิลด์ที่ไม่ได้ส่งมา = คงค่าเดิม)
+// ราคาตามช่วงเวลา: เวลาว่าง '' = ไม่มีช่วงนั้น (เริ่ม) / ถึงร้านปิด (สิ้นสุด)
 router.patch(
   '/shop',
   route(async (req, res) => {
-    const {
-      name,
-      taxId,
-      phone,
-      address,
-      bankName,
-      bankAccountNo,
-      bankAccountName,
-      qrCodeUrl,
-      peakStartTime,
-      floorPlanUrl,
-    } = req.body;
-    // ตรวจค่าพีคไทม์ก่อน — ถ้าลบช่องจนว่าง ส่ง '' ไปให้ DB แปลงเป็น time/numeric ไม่ได้ จะกลายเป็น 500
-    if (
-      peakStartTime != null &&
-      !(typeof peakStartTime === 'string' && /^([01]?\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(peakStartTime))
-    ) {
-      throw new HttpError(400, 'เวลาเริ่มพีคไทม์ต้องเป็นรูปแบบ HH:MM เช่น 18:00');
-    }
-    // ช่องค่าบริการเพิ่มว่าง = ไม่คิดค่าพีค (0)
-    const peakSurcharge = req.body.peakSurcharge === '' ? 0 : req.body.peakSurcharge;
-    if (peakSurcharge != null && !(Number.isFinite(Number(peakSurcharge)) && Number(peakSurcharge) >= 0)) {
-      throw new HttpError(400, 'ค่าบริการเพิ่มช่วงพีคต้องเป็นตัวเลขตั้งแต่ 0 ขึ้นไป');
-    }
-    const shop = (
-      await pool.query(
-        `UPDATE shop SET
-       name = COALESCE($1, name),
-       tax_id = COALESCE($2, tax_id),
-       phone = COALESCE($3, phone),
-       address = COALESCE($4, address),
-       bank_name = COALESCE($5, bank_name),
-       bank_account_no = COALESCE($6, bank_account_no),
-       bank_account_name = COALESCE($7, bank_account_name),
-       qr_code_url = COALESCE($8, qr_code_url),
-       peak_start_time = COALESCE($9, peak_start_time),
-       peak_surcharge = COALESCE($10, peak_surcharge),
-       floor_plan_url = COALESCE($11, floor_plan_url),
-       updated_at = now()
-     WHERE shop_id = (SELECT shop_id FROM shop ORDER BY shop_id LIMIT 1)
-     RETURNING *`,
-        [
-          name,
-          taxId,
-          phone,
-          address,
-          bankName,
-          bankAccountNo,
-          bankAccountName,
-          qrCodeUrl,
-          peakStartTime,
-          peakSurcharge,
-          floorPlanUrl,
-        ],
-      )
-    ).rows[0];
-    if (!shop) throw new HttpError(404, 'ยังไม่ได้ตั้งค่าร้าน');
+    const { name, taxId, phone, address, bankName, bankAccountNo, bankAccountName, qrCodeUrl, floorPlanUrl } = req.body;
+    const shop = await withTransaction(async (client) => {
+      const current = await getShop(client);
+      if (!current) throw new HttpError(404, 'ยังไม่ได้ตั้งค่าร้าน');
+      let rates = null;
+      if (RATE_KEYS.some((k) => req.body[k] !== undefined)) {
+        const merged = { ...rateFormFromRow(current) };
+        RATE_KEYS.forEach((k) => req.body[k] !== undefined && (merged[k] = req.body[k]));
+        rates = parseRates(merged);
+        await checkDiscountBelowRoomPrices(rates.offpeak_discount, '', client);
+      }
+      return (
+        await client.query(
+          `UPDATE shop SET
+             name = COALESCE($1, name),
+             tax_id = COALESCE($2, tax_id),
+             phone = COALESCE($3, phone),
+             address = COALESCE($4, address),
+             bank_name = COALESCE($5, bank_name),
+             bank_account_no = COALESCE($6, bank_account_no),
+             bank_account_name = COALESCE($7, bank_account_name),
+             qr_code_url = COALESCE($8, qr_code_url),
+             floor_plan_url = COALESCE($9, floor_plan_url),
+             peak_start_time = CASE WHEN $10 THEN $11::time ELSE peak_start_time END,
+             peak_end_time = CASE WHEN $10 THEN $12::time ELSE peak_end_time END,
+             peak_surcharge = CASE WHEN $10 THEN $13::numeric ELSE peak_surcharge END,
+             offpeak_start_time = CASE WHEN $10 THEN $14::time ELSE offpeak_start_time END,
+             offpeak_end_time = CASE WHEN $10 THEN $15::time ELSE offpeak_end_time END,
+             offpeak_discount = CASE WHEN $10 THEN $16::numeric ELSE offpeak_discount END,
+             updated_at = now()
+           WHERE shop_id = $17
+           RETURNING *`,
+          [
+            name,
+            taxId,
+            phone,
+            address,
+            bankName,
+            bankAccountNo,
+            bankAccountName,
+            qrCodeUrl,
+            floorPlanUrl,
+            Boolean(rates),
+            rates?.peak_start_time ?? null,
+            rates?.peak_end_time ?? null,
+            rates?.peak_surcharge ?? 0,
+            rates?.offpeak_start_time ?? null,
+            rates?.offpeak_end_time ?? null,
+            rates?.offpeak_discount ?? 0,
+            current.shop_id,
+          ],
+        )
+      ).rows[0];
+    });
     res.json(shop);
   }),
 );
@@ -741,6 +759,8 @@ router.patch(
   }),
 );
 
+const DAY_NAMES = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
+
 // PATCH /api/admin/shop/hours   { hours: [{ dayOfWeek, openHour, closeHour }, ...] }
 router.patch(
   '/shop/hours',
@@ -765,6 +785,28 @@ router.patch(
         await client.query(
           'UPDATE shop_hours SET open_hour = $1, close_hour = $2 WHERE shop_id = $3 AND day_of_week = $4',
           [h.openHour, h.closeHour, shop.shop_id, h.dayOfWeek],
+        );
+        // ราคาตามช่วงเวลาเฉพาะวันนี้: customRates = true ใช้ค่าที่ส่งมา / false = ใช้ค่าหลักของร้าน / ไม่ส่ง = คงเดิม
+        if (h.customRates === undefined) continue;
+        const label = `วัน${DAY_NAMES[h.dayOfWeek]}: `;
+        const rates = h.customRates ? parseRates(h, label) : null;
+        if (rates) await checkDiscountBelowRoomPrices(rates.offpeak_discount, label, client);
+        await client.query(
+          `UPDATE shop_hours SET custom_rates = $3,
+             peak_start_time = $4, peak_end_time = $5, peak_surcharge = $6,
+             offpeak_start_time = $7, offpeak_end_time = $8, offpeak_discount = $9
+           WHERE shop_id = $1 AND day_of_week = $2`,
+          [
+            shop.shop_id,
+            h.dayOfWeek,
+            Boolean(rates),
+            rates?.peak_start_time ?? null,
+            rates?.peak_end_time ?? null,
+            rates?.peak_surcharge ?? 0,
+            rates?.offpeak_start_time ?? null,
+            rates?.offpeak_end_time ?? null,
+            rates?.offpeak_discount ?? 0,
+          ],
         );
       }
       return (await client.query('SELECT * FROM shop_hours WHERE shop_id = $1 ORDER BY day_of_week', [shop.shop_id]))
@@ -825,6 +867,14 @@ function parseRoomTypeBody(body) {
   };
 }
 
+// ราคาห้องต้องมากกว่าส่วนลดออฟพีคที่ตั้งไว้ (ไม่งั้นช่วงออฟพีคราคาเป็น 0)
+async function checkPriceAboveDiscount(price, label, db = pool) {
+  const discount = await maxOffPeakDiscount(db);
+  if (discount > 0 && price <= discount) {
+    throw new HttpError(400, `${label}ต้องมากกว่าส่วนลดออฟพีค (${discount} บาท/ชม.)`);
+  }
+}
+
 const ROOM_TYPE_ERRORS = { 23505: [409, 'รหัสประเภทนี้มีอยู่แล้ว'] };
 
 // GET /api/admin/room-types -- ทุกประเภท + จำนวนห้อง (ทั้งหมด / ห้องธรรมดา / ห้องธีม)
@@ -868,6 +918,7 @@ router.patch(
   '/room-types/:id',
   route(async (req, res) => {
     const t = parseRoomTypeBody(req.body);
+    await checkPriceAboveDiscount(t.basePrice, 'ราคาห้องธรรมดาของประเภท');
     const ids = req.body.applyToRoomIds ?? [];
     if (!Array.isArray(ids) || !ids.every((id) => Number.isInteger(id) && id > 0)) {
       throw new HttpError(400, 'รายการห้องที่จะเปลี่ยนราคาไม่ถูกต้อง');
@@ -945,6 +996,7 @@ router.patch(
       const capacity = req.body.capacity === undefined ? undefined : parseCapacity(req.body.capacity, 'ความจุ');
       const price =
         req.body.pricePerHour === undefined ? undefined : parsePrice(req.body.pricePerHour, 'ราคาต่อชั่วโมง');
+      if (price !== undefined) await checkPriceAboveDiscount(price, 'ราคาห้อง');
       const description = trimmedText(req.body.description, 300, 'หมายเหตุ');
       const theme = trimmedText(req.body.theme, 100, 'ธีมห้อง');
       const updated = await pool.query(
