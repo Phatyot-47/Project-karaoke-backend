@@ -374,8 +374,9 @@ router.post(
           `INSERT INTO booking (
        booking_code, created_by, room_id, policy_id, booking_source,
        booking_date, start_datetime, end_datetime, walkin_name, walkin_phone,
-       booking_status, base_price, peak_surcharge_total, price_total, deposit_required, deposit_status
-     ) VALUES ($1,$2,$3,$4,'admin_walkin',$5,$6,$7,$8,$9,'confirmed',$10,$11,$12,$13,'paid')
+       booking_status, base_price, peak_surcharge_total, price_total, deposit_required, deposit_status,
+       offpeak_discount_total
+     ) VALUES ($1,$2,$3,$4,'admin_walkin',$5,$6,$7,$8,$9,'confirmed',$10,$11,$12,$13,'paid',$14)
      RETURNING *`,
           [
             q.bookingCode,
@@ -391,6 +392,7 @@ router.post(
             q.peakSurchargeTotal,
             q.priceTotal,
             q.depositRequired,
+            q.offPeakDiscountTotal,
           ],
         )
       ).rows[0];
