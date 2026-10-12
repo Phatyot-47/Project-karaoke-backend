@@ -25,6 +25,7 @@ router.use(requireAdmin);
 // คอลัมน์ + join ที่หน้าอนุมัติการจองและหน้าประวัติใช้ร่วมกัน: ชื่อห้อง/ลูกค้า + สลิปล่าสุด + รอบใช้บริการ
 const BOOKING_LIST_COLUMNS = `
   b.*, r.room_name, r.image_url, COALESCE(u.name, b.walkin_name) AS customer_name,
+  COALESCE(u.phone, b.walkin_phone) AS customer_phone,
   p.payment_id, p.evidence_url, p.payment_status,
   s.session_id, s.checkin_time, s.checkout_time, s.session_status, s.overtime_amount,
   ${submittedDepositSql('b')} AS paid_amount,
