@@ -82,6 +82,7 @@ npm run format  # จัดรูปแบบโค้ดด้วย Prettier
 - 🛠 `GET /api/admin/alerts?afterPaymentId=` (แจ้งเตือนแอดมิน: จำนวนรอดำเนินการ + สลิปใหม่หลัง payment_id ที่ส่งมา — หน้าแอดมินเรียกทุก 15 วินาที)
 - 🛠 `GET /api/admin/bookings/today`
 - 🛠 `GET /api/admin/bookings/history` (7 วันล่าสุด: วันนี้ย้อนหลัง 6 วัน)
+  (รายการจองของแอดมินมี `customer_name`, `customer_phone` = ชื่อ/เบอร์ที่ลูกค้าใช้ล็อกอิน หรือที่กรอกตอนวอล์คอิน)
 - 🛠 `PATCH /api/admin/bookings/:id/confirm` (ต้องได้รับมัดจำครบก่อน)
 - 🛠 `PATCH /api/admin/bookings/:id/cash-deposit` (ลูกค้าจ่ายมัดจำเงินสดที่หน้าร้าน)
 - 🛠 `PATCH /api/admin/bookings/:id/reject` `{ reason }`
