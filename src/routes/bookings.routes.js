@@ -37,8 +37,8 @@ router.post(
           `INSERT INTO booking (
        booking_code, customer_id, room_id, policy_id, booking_source,
        booking_date, start_datetime, end_datetime, guest_count, booking_status,
-       base_price, peak_surcharge_total, price_total, deposit_required, deposit_status, note, offpeak_discount_total
-     ) VALUES ($1,$2,$3,$4,'customer_online',$5,$6,$7,$8,'pending',$9,$10,$11,$12,'unpaid',$13,$14)
+       base_price, peak_surcharge_total, price_total, deposit_required, deposit_status, note
+     ) VALUES ($1,$2,$3,$4,'customer_online',$5,$6,$7,$8,'pending',$9,$10,$11,$12,'unpaid',$13)
      RETURNING *`,
           [
             q.bookingCode,
@@ -54,7 +54,6 @@ router.post(
             q.priceTotal,
             q.depositRequired,
             note || null,
-            q.offPeakDiscountTotal,
           ],
         )
       ).rows[0];
@@ -142,7 +141,7 @@ router.patch(
               EXISTS (SELECT 1 FROM service_session s WHERE s.booking_id = b.booking_id) AS checked_in,
               COALESCE(p.allow_edit_before_hours, p.cancel_hours_before, 0) AS edit_hours_before,
               b.start_datetime > LOCALTIMESTAMP
-                + make_interval(hours => COALESCE(p.allow_edit_before_hours, p.cancel_hours_before, 0)) AS within_window
+                + COALESCE(p.allow_edit_before_hours, p.cancel_hours_before, 0) * interval '1 hour' AS within_window
        FROM booking b
        JOIN room r ON r.room_id = b.room_id
        LEFT JOIN shop_policy p ON p.policy_id = b.policy_id
@@ -165,7 +164,7 @@ router.patch(
         if (!old.within_window) {
           throw new HttpError(
             409,
-            `แก้ไขได้ล่วงหน้าก่อนเวลาเริ่มอย่างน้อย ${old.edit_hours_before} ชั่วโมงเท่านั้น กรุณาติดต่อร้าน`,
+            `แก้ไขได้ก่อนเวลาเริ่มอย่างน้อย ${Number(old.edit_hours_before)} ชั่วโมงเท่านั้น กรุณาติดต่อร้าน`,
           );
         }
         if (startDatetime.slice(0, 10) !== old.booking_date)
@@ -197,7 +196,7 @@ router.patch(
           await client.query(
             `UPDATE booking SET
          room_id = $2, start_datetime = $3, end_datetime = $4,
-         base_price = $5, peak_surcharge_total = $6, price_total = $7, deposit_required = $8, offpeak_discount_total = $11,
+         base_price = $5, peak_surcharge_total = $6, price_total = $7, deposit_required = $8,
          booking_status = CASE WHEN $9 THEN 'pending' ELSE booking_status END,
          deposit_status = CASE WHEN $9 THEN 'unpaid' ELSE deposit_status END,
          note = concat_ws(E'\\n', note, '[ลูกค้าแก้ไข ' || to_char(LOCALTIMESTAMP, 'YYYY-MM-DD HH24:MI') || '] ' || $10::text),
@@ -215,7 +214,6 @@ router.patch(
               depositRequired,
               topUp > 0,
               change,
-              q.offPeakDiscountTotal,
             ],
           )
         ).rows[0];
@@ -241,7 +239,7 @@ router.patch(
               EXISTS (SELECT 1 FROM service_session s WHERE s.booking_id = b.booking_id) AS checked_in,
               COALESCE(p.cancel_hours_before, latest.cancel_hours_before, 0) AS cancel_hours_before,
               b.start_datetime > LOCALTIMESTAMP
-                + make_interval(hours => COALESCE(p.cancel_hours_before, latest.cancel_hours_before, 0)) AS within_window
+                + COALESCE(p.cancel_hours_before, latest.cancel_hours_before, 0) * interval '1 hour' AS within_window
        FROM booking b
        LEFT JOIN shop_policy p ON p.policy_id = b.policy_id
        LEFT JOIN LATERAL (${LATEST_POLICY_SQL}) latest ON true
@@ -258,7 +256,7 @@ router.patch(
       if (!found.within_window) {
         throw new HttpError(
           409,
-          `ยกเลิกได้ล่วงหน้าก่อนเวลาเริ่มอย่างน้อย ${found.cancel_hours_before} ชั่วโมงเท่านั้น กรุณาติดต่อร้าน`,
+          `ยกเลิกได้ก่อนเวลาเริ่มอย่างน้อย ${Number(found.cancel_hours_before)} ชั่วโมงเท่านั้น กรุณาติดต่อร้าน`,
         );
       }
       return (

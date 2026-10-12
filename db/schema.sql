@@ -94,7 +94,6 @@ CREATE TABLE public.booking (
     created_at timestamp without time zone DEFAULT now() NOT NULL,
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
     cancelled_by character varying(10),
-    offpeak_discount_total numeric(10,2) DEFAULT 0 NOT NULL,
     CONSTRAINT booking_cancelled_by_check CHECK (((cancelled_by)::text = ANY ((ARRAY['customer'::character varying, 'shop'::character varying, 'system'::character varying])::text[]))),
     CONSTRAINT booking_check CHECK ((end_datetime > start_datetime)),
     CONSTRAINT booking_check1 CHECK (((customer_id IS NOT NULL) OR (walkin_name IS NOT NULL))),
@@ -374,10 +373,7 @@ CREATE TABLE public.shop (
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
     qr_code_url text,
     floor_plan_url text,
-    peak_end_time time without time zone,
-    offpeak_start_time time without time zone,
-    offpeak_end_time time without time zone,
-    offpeak_discount numeric(10,2) DEFAULT 0 NOT NULL
+    peak_end_time time without time zone
 );
 
 
@@ -395,9 +391,6 @@ CREATE TABLE public.shop_hours (
     peak_start_time time without time zone,
     peak_end_time time without time zone,
     peak_surcharge numeric(10,2) DEFAULT 0 NOT NULL,
-    offpeak_start_time time without time zone,
-    offpeak_end_time time without time zone,
-    offpeak_discount numeric(10,2) DEFAULT 0 NOT NULL,
     CONSTRAINT shop_hours_close_hour_check CHECK (((close_hour >= 0) AND (close_hour <= 24))),
     CONSTRAINT shop_hours_day_of_week_check CHECK (((day_of_week >= 0) AND (day_of_week <= 6))),
     CONSTRAINT shop_hours_open_hour_check CHECK (((open_hour >= 0) AND (open_hour <= 24)))
@@ -431,8 +424,8 @@ ALTER SEQUENCE public.shop_hours_shop_hours_id_seq OWNED BY public.shop_hours.sh
 CREATE TABLE public.shop_policy (
     policy_id integer NOT NULL,
     deposit_percent numeric(5,2) DEFAULT 20 NOT NULL,
-    cancel_hours_before integer DEFAULT 1,
-    allow_edit_before_hours integer,
+    cancel_hours_before numeric(4,1) DEFAULT 1,
+    allow_edit_before_hours numeric(4,1),
     refund_policy_desc text,
     no_show_policy_desc text,
     effective_from timestamp without time zone DEFAULT now(),

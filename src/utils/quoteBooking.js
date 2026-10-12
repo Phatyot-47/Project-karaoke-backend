@@ -6,18 +6,14 @@ const { getRatesForDate } = require('./rates');
 const { makeCode } = require('./codes');
 const { HttpError } = require('./http');
 
-// ราคาห้องช่วงหนึ่ง (รวมค่าพีค / หักส่วนลดออฟพีค ตามราคาตามช่วงเวลาของวันนั้น) — ช่วงเวลาไม่ถูกต้องโยน HttpError 400
+// ราคาห้องช่วงหนึ่ง (รวมค่าพีคตามพีคไทม์ของวันนั้น) — ช่วงเวลาไม่ถูกต้องโยน HttpError 400
 async function priceRange(room, startDatetime, endDatetime, db = pool) {
   const rates = await getRatesForDate(String(startDatetime).slice(0, 10), db);
-  let price;
   try {
-    price = calculateBookingPrice({ pricePerHour: Number(room.price_per_hour), rates, startDatetime, endDatetime });
+    return calculateBookingPrice({ pricePerHour: Number(room.price_per_hour), rates, startDatetime, endDatetime });
   } catch (err) {
     throw new HttpError(400, err.message);
   }
-  // กันราคา 0 บาท (มัดจำ 0 → ลูกค้าจ่ายมัดจำไม่ได้ การจองจะถูกยกเลิกเอง)
-  if (price.priceTotal <= 0) throw new HttpError(400, 'ราคาหลังหักส่วนลดออฟพีคต้องมากกว่า 0 บาท กรุณาติดต่อร้าน');
-  return price;
 }
 
 /**
