@@ -131,13 +131,20 @@ router.get(
 );
 
 // GET /api/admin/bookings/history -- หน้า "ประวัติการจอง" ของแอดมิน (ทุกสถานะ)
+// แสดงเฉพาะ 7 วันล่าสุด (วันนี้ย้อนหลัง 6 วัน ตามวันที่ใช้บริการ) ไม่รวมการจองวันข้างหน้า
+// เรียงวันล่าสุดก่อน ในวันเดียวกันเรียงเวลาเริ่มล่าสุดก่อน — ข้อมูลเก่ายังอยู่ใน DB (รายงานรายได้ใช้)
+const HISTORY_DAYS = 7;
 router.get(
   '/bookings/history',
   route(async (req, res) => {
     await expireStalePendingBookings();
-    res.json(
-      (await pool.query(`SELECT ${BOOKING_LIST_COLUMNS} ${BOOKING_LIST_JOINS} ORDER BY b.created_at DESC`)).rows,
+    const result = await pool.query(
+      `SELECT ${BOOKING_LIST_COLUMNS} ${BOOKING_LIST_JOINS}
+       WHERE b.booking_date BETWEEN CURRENT_DATE - ($1::int - 1) AND CURRENT_DATE
+       ORDER BY b.booking_date DESC, b.start_datetime DESC`,
+      [HISTORY_DAYS],
     );
+    res.json(result.rows);
   }),
 );
 
