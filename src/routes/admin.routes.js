@@ -1,28 +1,33 @@
-// API ฝั่งแอดมิน (/api/admin/...) — อนุมัติการจอง, วอล์คอิน, Check-in/out, ต่อเวลา, ตรวจสลิป,
-// ตั้งค่าร้าน/ห้อง และรายงานรายได้
+// API ฝั่งแอดมิน (/api/admin/...) — ทุกอย่างที่หน้าแอดมินใช้ แบ่งเป็นหมวด (หาหัวข้อ ===== ในไฟล์):
+//   1. อนุมัติการจอง + ประวัติ (ยืนยัน/ปฏิเสธ, รับเงินสด, ไม่มาใช้บริการ, ย้ายห้อง, วอล์คอิน)
+//   2. Check-in / ต่อเวลา / Check-out
+//   3. ตรวจสลิป
+//   4. ตั้งค่าร้าน (ข้อมูลร้าน, พีคไทม์, นโยบาย, เวลาเปิด-ปิด)
+//   5. ประเภทห้อง   6. ตั้งค่าห้อง   7. รายงานรายได้
 const router = require('express').Router();
 const { pool, withTransaction } = require('../db');
 const { HttpError, route } = require('../utils/http');
 const { getShop } = require('../utils/shop');
-const { priceRange, quoteBooking } = require('../utils/quoteBooking');
+const { findActiveRoom, priceRange, quoteBooking } = require('../utils/quoteBooking');
 const { expireStalePendingBookings } = require('../utils/expireBookings');
 const { isStartInPast } = require('../utils/time');
 const { makeCode } = require('../utils/codes');
-const { submittedDepositSql } = require('../utils/deposit');
+const { submittedDepositSql, paidDepositSql } = require('../utils/deposit');
 const { requireAdmin } = require('../utils/auth');
 const { ROOM_TYPE_COLUMNS, joinRoomType } = require('../utils/roomType');
 const { notifyBookingCustomer } = require('../utils/notify');
-const { normalizePhone } = require('../utils/validate');
+const { normalizePhone, reasonText } = require('../utils/validate');
 const { parseRates } = require('../utils/rates');
 
-// ทุก route ในไฟล์นี้ต้องล็อกอินเป็นแอดมิน — ผู้ทำรายการ (checked_in_by, verified_by ฯลฯ) = แอดมินเจ้าของ token
+// ทุก route ในไฟล์นี้ต้องล็อกอินเป็นแอดมิน — ระบบบันทึกว่าแอดมินคนไหนเป็นคนทำ (checked_in_by, verified_by ฯลฯ) จาก token
 router.use(requireAdmin);
 
 /* ============================================================
  * อนุมัติการจอง (หน้า "อนุมัติการจอง") + ประวัติการจอง
  * ========================================================== */
 
-// คอลัมน์ + join ที่หน้าอนุมัติการจองและหน้าประวัติใช้ร่วมกัน: ชื่อห้อง/ลูกค้า + สลิปล่าสุด + รอบใช้บริการ
+// ข้อมูลที่หน้าอนุมัติการจองและหน้าประวัติใช้ร่วมกัน (เขียนไว้ที่เดียว 2 หน้าจะได้เหมือนกัน):
+// ข้อมูลการจอง + ชื่อห้อง + ชื่อ/เบอร์ลูกค้า + สลิปล่าสุด + ยอดมัดจำที่ส่งมาแล้ว + ข้อมูล Check-in/out
 const BOOKING_LIST_COLUMNS = `
   b.*, r.room_name, r.image_url, COALESCE(u.name, b.walkin_name) AS customer_name,
   COALESCE(u.phone, b.walkin_phone) AS customer_phone,
@@ -41,11 +46,11 @@ const BOOKING_LIST_JOINS = `
   ) p ON true
   LEFT JOIN service_session s ON s.booking_id = b.booking_id`;
 
-// รายได้ของ booking: ใช้บริการ/ยืนยันแล้ว = ยอดรวม, ไม่มาใช้บริการ (no-show) = มัดจำที่ร้านเก็บไว้ (ไม่คืน)
-// ลูกค้ายกเลิกเอง (cancelled_by = 'customer') = ร้านเก็บมัดจำที่ตรวจผ่านแล้วไว้ตามนโยบาย → นับเป็นรายได้ด้วย
-// (ร้านยกเลิก = คืนเงินนอกระบบ ไม่นับ) — a = alias ของตาราง booking ใน query นั้น
-const paidDepositSql = (a) =>
-  `(SELECT COALESCE(SUM(amount), 0) FROM payment WHERE payment.booking_id = ${a}.booking_id AND payment.payment_status = 'paid')`;
+// วิธีนับรายได้ของการจองแต่ละรายการ (a = ชื่อย่อตาราง booking ในคำสั่งนั้น):
+//   - ยืนยันแล้ว / ใช้บริการเสร็จ = ยอดรวมทั้งหมด
+//   - ไม่มาใช้บริการ (no-show) = มัดจำ (ร้านเก็บไว้ ไม่คืน)
+//   - ลูกค้ายกเลิกเอง = มัดจำที่ร้านได้รับแล้ว (ไม่คืนตามนโยบาย)
+//   - ร้านยกเลิก = ไม่นับ (ร้านคืนเงินให้ลูกค้านอกระบบ)
 const revenueFilter = (a) =>
   `(${a}.booking_status IN ('confirmed','completed','no_show')
     OR (${a}.booking_status = 'cancelled' AND ${a}.cancelled_by = 'customer' AND ${paidDepositSql(a)} > 0))`;
@@ -54,7 +59,12 @@ const revenueSql = (a) =>
         WHEN ${a}.booking_status = 'cancelled' THEN ${paidDepositSql(a)}
         ELSE ${a}.price_total END`;
 
-// GET /api/admin/bookings/today -- การ์ดสรุป + รายการจองวันนี้
+// การจองที่ "ค้างจากวันก่อน" = วันที่จองผ่านไปแล้ว แต่ยังรอยืนยัน/ยืนยันแล้วและยังไม่ได้ Check-in
+// (แอดมินต้องจัดการต่อ เช่น ตรวจสลิป หรือบันทึกไม่มาใช้บริการ) — o = ชื่อย่อตาราง booking
+const OVERDUE_SQL = `o.booking_date < CURRENT_DATE AND o.booking_status IN ('pending','confirmed')
+  AND NOT EXISTS (SELECT 1 FROM service_session ss WHERE ss.booking_id = o.booking_id)`;
+
+// GET /api/admin/bookings/today -- หน้า "อนุมัติการจอง": การ์ดสรุปตัวเลข + รายการจองวันนี้
 router.get(
   '/bookings/today',
   route(async (req, res) => {
@@ -65,9 +75,7 @@ router.get(
       COUNT(*) FILTER (WHERE booking_status = 'confirmed') AS in_progress_count,
       COUNT(*) FILTER (WHERE booking_status = 'completed') AS completed_count,
       COALESCE(SUM(${revenueSql('booking')}) FILTER (WHERE ${revenueFilter('booking')}), 0) AS revenue_today,
-      (SELECT COUNT(*) FROM booking o
-       WHERE o.booking_date < CURRENT_DATE AND o.booking_status IN ('pending','confirmed')
-         AND NOT EXISTS (SELECT 1 FROM service_session ss WHERE ss.booking_id = o.booking_id)) AS overdue_count
+      (SELECT COUNT(*) FROM booking o WHERE ${OVERDUE_SQL}) AS overdue_count
     FROM booking
     WHERE booking_date = CURRENT_DATE`);
     const list = await pool.query(`
@@ -79,8 +87,7 @@ router.get(
       SELECT SUM(extend_minutes) AS extend_minutes, SUM(extra_amount) AS extra_amount
       FROM extension WHERE extension.session_id = s.session_id
     ) x ON true
-    -- รอบที่ยังไม่ Check-out ให้แสดงต่อแม้เลยเที่ยงคืนไปแล้ว (เช่น ช่วง 23:30-00:00 ที่ออกช้า)
-    -- และรายการที่ค้างจากวันก่อน (สลิปยังไม่ได้ตรวจ / ยืนยันแล้วแต่ไม่มา Check-in) ให้แอดมินจัดการต่อ ขึ้นก่อนเสมอ
+    -- แสดง: การจองวันนี้ + ห้องที่ยังใช้อยู่ (ยังไม่ Check-out แม้เลยเที่ยงคืน) + รายการค้างจากวันก่อน (ขึ้นก่อนเสมอ)
     WHERE b.booking_date = CURRENT_DATE OR s.session_status = 'in_progress'
        OR (b.booking_date < CURRENT_DATE AND b.booking_status IN ('pending','confirmed') AND s.session_id IS NULL)
     -- ในแต่ละกลุ่ม (ค้างจากวันก่อน / วันนี้) เรียงตามเวลาที่ลูกค้ากดจอง ใหม่สุดขึ้นก่อน
@@ -89,10 +96,12 @@ router.get(
   }),
 );
 
-// GET /api/admin/alerts?afterPaymentId=<id> -- แจ้งเตือนฝั่งแอดมิน (หน้าแอดมินเรียกทุก 15 วินาที)
-// pendingCount = ตัวเลขบนเมนู "อนุมัติการจอง" (รอยืนยันวันนี้ + ค้างจากวันก่อน — นับแบบเดียวกับ /bookings/today)
-// newSlips = สลิปที่ยังรอตรวจ (ของการจองที่ยังไม่ถูกยกเลิก) และส่งมาหลัง payment_id ที่หน้าเว็บเห็นล่าสุด (payment_id เพิ่มขึ้นเรื่อยๆ ใช้เป็นตัวชี้ได้)
-// latestPaymentId = ให้หน้าเว็บจำไว้ส่งมาครั้งถัดไป (ครั้งแรกหน้าเว็บส่ง 0 แค่เพื่อเอาค่านี้ ไม่ต้องเด้งแจ้งเตือนของเก่า)
+// GET /api/admin/alerts?afterPaymentId=<id> -- แจ้งเตือนฝั่งแอดมิน (หน้าแอดมินถามทุก 15 วินาที)
+// ตอบ 3 อย่าง:
+//   pendingCount    = ตัวเลขแดงบนเมนู "อนุมัติการจอง" (รอยืนยันวันนี้ + ค้างจากวันก่อน)
+//   newSlips        = สลิปใหม่ที่รอตรวจ ซึ่งส่งมาหลังจากครั้งที่แล้วที่หน้าเว็บถาม (ใช้เด้งกล่องแจ้งเตือน + เสียง)
+//   latestPaymentId = เลขสลิปล่าสุด ให้หน้าเว็บจำไว้ส่งมาครั้งถัดไป (เลข payment_id เพิ่มขึ้นเรื่อยๆ จึงใช้บอกว่า "ใหม่กว่า" ได้)
+// ครั้งแรกหน้าเว็บส่ง 0 มาแค่เพื่อเอาเลขล่าสุด จะได้ไม่เด้งแจ้งเตือนของเก่าทั้งหมด
 router.get(
   '/alerts',
   route(async (req, res) => {
@@ -103,9 +112,7 @@ router.get(
       pool.query(`
         SELECT
           (SELECT COUNT(*) FROM booking WHERE booking_date = CURRENT_DATE AND booking_status = 'pending')
-          + (SELECT COUNT(*) FROM booking o
-             WHERE o.booking_date < CURRENT_DATE AND o.booking_status IN ('pending','confirmed')
-               AND NOT EXISTS (SELECT 1 FROM service_session ss WHERE ss.booking_id = o.booking_id)) AS n`),
+          + (SELECT COUNT(*) FROM booking o WHERE ${OVERDUE_SQL}) AS n`),
       pool.query('SELECT COALESCE(MAX(payment_id), 0) AS id FROM payment'),
       pool.query(
         `SELECT p.payment_id, p.booking_id, p.amount, r.room_name, COALESCE(u.name, b.walkin_name) AS customer_name,
@@ -132,8 +139,8 @@ router.get(
 );
 
 // GET /api/admin/bookings/history -- หน้า "ประวัติการจอง" ของแอดมิน (ทุกสถานะ)
-// แสดงเฉพาะ 7 วันล่าสุด (วันนี้ย้อนหลัง 6 วัน ตามวันที่ใช้บริการ) ไม่รวมการจองวันข้างหน้า
-// เรียงวันล่าสุดก่อน ในวันเดียวกันเรียงเวลาเริ่มล่าสุดก่อน — ข้อมูลเก่ายังอยู่ใน DB (รายงานรายได้ใช้)
+// แสดงเฉพาะ 7 วันล่าสุด (วันนี้ + ย้อนหลัง 6 วัน นับจากวันที่ใช้บริการ) ไม่รวมการจองวันข้างหน้า
+// เรียงวันล่าสุดก่อน และในวันเดียวกันเรียงเวลาเริ่มล่าสุดก่อน — การจองที่เก่ากว่านี้ไม่ได้ถูกลบ (รายงานรายได้ยังใช้)
 const HISTORY_DAYS = 7;
 router.get(
   '/bookings/history',
@@ -149,15 +156,16 @@ router.get(
   }),
 );
 
-// ---- นโยบายมัดจำเมื่อ "ร้าน" ยกเลิกการจอง ----
-// ลูกค้ายกเลิกเอง / ไม่มาใช้บริการ = มัดจำไม่คืน (สลิปที่ค้างตรวจยังตรวจได้ เพื่อยืนยันว่าได้รับเงินจริง)
-// ร้านยกเลิก = สลิปที่ค้างตรวจทั้งหมดไม่ผ่านอัตโนมัติ และร้านคืนเงินที่ลูกค้าโอนมาเองนอกระบบ
+// ---- นโยบายมัดจำเมื่อมีการยกเลิก ----
+// ลูกค้ายกเลิกเอง / ไม่มาใช้บริการ = ร้านไม่คืนมัดจำ (สลิปที่ค้างตรวจยังตรวจได้ เพื่อยืนยันว่าได้เงินจริง)
+// ร้านเป็นคนยกเลิก = สลิปที่ค้างตรวจทั้งหมดถูกตั้งเป็น "ไม่ผ่าน" อัตโนมัติ และร้านคืนเงินให้ลูกค้าเองนอกระบบ
 const SHOP_CANCEL_SLIP_REMARK = 'ไม่ผ่าน (การจองถูกยกเลิก)';
 const REFUND_NOTE = 'หากโอนมัดจำมาแล้ว ร้านจะติดต่อคืนเงินให้';
 
 /**
- * เรียกใน transaction หลังร้านเปลี่ยนการจองเป็น cancelled — คืนค่า true ถ้าลูกค้าเคยโอนเงินมา
- * (มีสลิปที่ตรวจผ่านแล้ว หรือสลิปที่เพิ่งถูกเปลี่ยนเป็นไม่ผ่าน) ไว้ต่อท้ายแจ้งเตือนว่าร้านจะติดต่อคืนเงิน
+ * เรียกหลังร้านยกเลิกการจอง (ใน withTransaction เดียวกัน): ตั้งสลิปที่ค้างตรวจเป็น "ไม่ผ่าน" ทั้งหมด
+ * คืนค่า true ถ้าลูกค้าเคยโอนเงินมา (มีสลิปที่ผ่านแล้ว หรือสลิปที่เพิ่งถูกตั้งเป็นไม่ผ่าน)
+ * → เอาไปต่อท้ายข้อความแจ้งเตือนว่า "ร้านจะติดต่อคืนเงินให้"
  */
 async function rejectPendingSlipsOnShopCancel(client, bookingId, adminId) {
   const rejected = await client.query(
@@ -165,23 +173,23 @@ async function rejectPendingSlipsOnShopCancel(client, bookingId, adminId) {
      WHERE booking_id = $1 AND payment_status = 'pending'`,
     [bookingId, adminId, SHOP_CANCEL_SLIP_REMARK],
   );
-  // ไม่มีสลิปรอตรวจแล้ว: ตรวจผ่านครบยอด = paid (เงินที่ร้านต้องคืน) / ไม่ครบหรือไม่มี = unpaid
+  // ตอนนี้ไม่มีสลิปรอตรวจแล้ว: ได้เงินครบมัดจำ = paid (ยอดที่ร้านต้องคืน) / ไม่ครบหรือไม่มีเลย = unpaid
   const paid = (
     await client.query(
       `UPDATE booking SET deposit_status = CASE
-         WHEN (SELECT COALESCE(SUM(amount), 0) FROM payment WHERE booking_id = $1 AND payment_status = 'paid')
-              >= deposit_required AND deposit_required > 0 THEN 'paid'
+         WHEN ${paidDepositSql('booking')} >= deposit_required AND deposit_required > 0 THEN 'paid'
          ELSE 'unpaid' END
        WHERE booking_id = $1
-       RETURNING (SELECT COALESCE(SUM(amount), 0) FROM payment WHERE booking_id = $1 AND payment_status = 'paid') AS paid_sum`,
+       RETURNING ${paidDepositSql('booking')} AS paid_sum`,
       [bookingId],
     )
   ).rows[0];
   return rejected.rowCount > 0 || Number(paid?.paid_sum) > 0;
 }
 
-// PATCH /api/admin/bookings/:id/confirm -- กดปุ่ม "ยืนยัน" (ยืนยันรายการที่เลยเวลาสิ้นสุดไปแล้วไม่ได้)
-// ต้องได้รับมัดจำครบก่อน (ตรวจสลิปผ่าน หรือกด "รับมัดจำเงินสดแล้ว") — กันยืนยันการจองที่ร้านยังไม่ได้เงิน
+// PATCH /api/admin/bookings/:id/confirm -- ปุ่ม "ยืนยัน"
+// ยืนยันได้เมื่อ: ยังรอยืนยันอยู่ + ยังไม่เลยเวลาสิ้นสุด + ได้มัดจำครบแล้ว (ตรวจสลิปผ่าน หรือกด "รับมัดจำเงินสดแล้ว")
+// ยืนยันแล้วลูกค้าได้แจ้งเตือน "ร้านยืนยันการจองของคุณแล้ว"
 router.patch(
   '/bookings/:id/confirm',
   route(async (req, res) => {
@@ -213,9 +221,9 @@ router.patch(
   }),
 );
 
-// PATCH /api/admin/bookings/:id/cash-deposit -- กดปุ่ม "รับมัดจำเงินสดแล้ว" (ลูกค้าจ่ายมัดจำเป็นเงินสดที่หน้าร้าน)
-// บันทึกเป็นการชำระเงินแบบเงินสด (ตรวจผ่านแล้ว) เท่ากับยอดมัดจำที่ยังขาด แล้วแอดมินกดยืนยันการจองต่อได้
-// ถ้ามีสลิปรอตรวจอยู่ ให้ตรวจสลิปก่อน (กันรับเงินซ้ำ)
+// PATCH /api/admin/bookings/:id/cash-deposit -- ปุ่ม "รับมัดจำเงินสดแล้ว" (ลูกค้ามาจ่ายมัดจำเป็นเงินสดที่ร้าน)
+// บันทึกเป็นการจ่ายเงินสด (ถือว่าผ่านแล้ว) เท่ากับยอดที่ยังขาด จากนั้นแอดมินกด "ยืนยัน" ต่อได้
+// ถ้ามีสลิปรอตรวจอยู่ ต้องตรวจสลิปก่อน (กันรับเงินซ้ำ 2 ทาง)
 router.patch(
   '/bookings/:id/cash-deposit',
   route(async (req, res) => {
@@ -250,12 +258,12 @@ router.patch(
   }),
 );
 
-// PATCH /api/admin/bookings/:id/reject  { reason } -- กดปุ่ม "ปฏิเสธ" (pending) / "ยกเลิกการจอง" (confirmed)
-// ยกเลิกได้ทั้งรายการที่รอยืนยันและที่ยืนยันแล้ว แต่ต้องยังไม่ Check-in (มีรอบใช้บริการแล้วให้ Check-out แทน)
+// PATCH /api/admin/bookings/:id/reject  { reason } -- ปุ่ม "ปฏิเสธ" (รายการรอยืนยัน) / "ยกเลิกการจอง" (ยืนยันแล้ว)
+// ร้านยกเลิกได้ถ้ายังไม่ Check-in (เข้าห้องไปแล้วให้กด Check-out แทน) → ลูกค้าได้แจ้งเตือนพร้อมเหตุผล
 router.patch(
   '/bookings/:id/reject',
   route(async (req, res) => {
-    const reason = (typeof req.body.reason === 'string' && req.body.reason.trim()) || 'ไม่ระบุเหตุ';
+    const reason = reasonText(req.body.reason, 'ไม่ระบุเหตุ');
     const booking = await withTransaction(async (client) => {
       const updated = (
         await client.query(
@@ -280,13 +288,12 @@ router.patch(
   }),
 );
 
-// PATCH /api/admin/bookings/:id/no-show -- กดปุ่ม "ไม่มาใช้บริการ" (ขอบเขตข้อ 2.3)
-// ได้เฉพาะรายการที่ยืนยันแล้ว เลยเวลาเริ่มแล้ว และยังไม่ Check-in — ปล่อยช่วงเวลาคืน มัดจำไม่คืนตามนโยบาย
+// PATCH /api/admin/bookings/:id/no-show -- ปุ่ม "ไม่มาใช้บริการ" (ขอบเขตข้อ 2.3)
+// กดได้เมื่อ: ยืนยันแล้ว + เลยเวลาเริ่มแล้ว + ลูกค้ายังไม่ Check-in → ห้องว่างให้คนอื่นจองต่อ ร้านไม่คืนมัดจำ
 router.patch(
   '/bookings/:id/no-show',
   route(async (req, res) => {
-    const reason =
-      (typeof req.body.reason === 'string' && req.body.reason.trim()) || 'ลูกค้าไม่มาใช้บริการตามเวลาที่จอง';
+    const reason = reasonText(req.body.reason, 'ลูกค้าไม่มาใช้บริการตามเวลาที่จอง');
     const booking = await withTransaction(async (client) => {
       const updated = (
         await client.query(
@@ -307,9 +314,9 @@ router.patch(
   }),
 );
 
-// PATCH /api/admin/bookings/:id/change-room  { roomId } -- ย้ายลูกค้าไปห้องอื่น (ช่วงเวลาเดิม ราคาเดิม)
-// DB ไม่มีตารางประวัติการย้ายห้อง จึงต่อท้ายบันทึกการย้ายไว้ใน booking.note แทน
-// ห้องใหม่ชนกับการจองอื่นหรือไม่ ให้ exclusion constraint (23P01) ของ booking เป็นตัวตัดสิน
+// PATCH /api/admin/bookings/:id/change-room  { roomId } -- ปุ่ม "ย้ายห้อง" (เวลาเดิม ราคาเดิม)
+// ไม่มีตารางเก็บประวัติการย้ายห้อง จึงเขียนบันทึกการย้ายต่อท้ายหมายเหตุ (note) ของการจองแทน
+// ถ้าห้องใหม่ไม่ว่างช่วงนั้น ฐานข้อมูลจะไม่ยอมบันทึก (error 23P01) แล้วเราตอบว่าห้องไม่ว่าง
 router.patch(
   '/bookings/:id/change-room',
   route(
@@ -330,10 +337,7 @@ router.patch(
           throw new HttpError(404, 'ไม่พบรายการ หรือรายการนี้ย้ายห้องไม่ได้แล้ว');
         }
         if (current.room_id === newRoomId) throw new HttpError(400, 'ห้องใหม่ต้องไม่ใช่ห้องเดิม');
-        const newRoom = (
-          await client.query('SELECT room_name FROM room WHERE room_id = $1 AND is_active = true', [newRoomId])
-        ).rows[0];
-        if (!newRoom) throw new HttpError(404, 'ไม่พบห้องใหม่ หรือห้องปิดให้บริการ');
+        const newRoom = await findActiveRoom(newRoomId, client);
         const moved = (
           await client.query(
             `UPDATE booking SET
@@ -346,7 +350,7 @@ router.patch(
             [req.params.id, newRoomId, current.room_name, newRoom.room_name],
           )
         ).rows[0];
-        // ข้อความแจ้งเตือนใช้ชื่อห้องใหม่แล้ว (notify อ่านห้องจาก booking หลังอัปเดต)
+        // แจ้งเตือนลูกค้า (ข้อความจะเป็นชื่อห้องใหม่ เพราะอ่านจากการจองที่อัปเดตแล้ว)
         await notifyBookingCustomer(client, moved.booking_id, 'room_changed', `ย้ายจากห้อง ${current.room_name}`);
         return moved;
       });
@@ -356,9 +360,10 @@ router.patch(
   ),
 );
 
-const WALKIN_MIN_MINUTES = 60; // วอล์คอินจองขั้นต่ำ 1 ชม. — ต้องตรงกับ WALKIN_MIN_SLOTS ฝั่ง frontend
+const WALKIN_MIN_MINUTES = 60; // วอล์คอินต้องจองอย่างน้อย 1 ชม. — ต้องตรงกับ WALKIN_MIN_SLOTS ในหน้าเว็บ
 
-// POST /api/admin/bookings/walkin -- ฟอร์ม "เพิ่มรายการจองวอล์คอิน"
+// POST /api/admin/bookings/walkin -- หน้า "จองวอล์คอิน" (ลูกค้ามาที่ร้านเลย ไม่ได้จองผ่านเว็บ)
+// สร้างเป็น "ยืนยันแล้ว + จ่ายมัดจำแล้ว" ทันที (จ่ายที่ร้าน) ไม่ต้องผ่านขั้นตรวจสลิป
 router.post(
   '/bookings/walkin',
   route(
@@ -373,9 +378,7 @@ router.post(
       if (isStartInPast(startDatetime)) throw new HttpError(400, 'เวลาที่เลือกผ่านไปแล้ว กรุณาเลือกเวลาอื่น');
 
       await expireStalePendingBookings();
-      // ห้องที่ปิดให้บริการอยู่ (is_active = false) ห้ามจองวอล์คอิน เหมือนฝั่งลูกค้า
-      const room = (await pool.query('SELECT * FROM room WHERE room_id = $1 AND is_active = true', [roomId])).rows[0];
-      if (!room) throw new HttpError(404, 'ไม่พบห้อง หรือห้องปิดให้บริการ');
+      const room = await findActiveRoom(roomId); // ห้องที่ปิดให้บริการจองไม่ได้ เหมือนฝั่งลูกค้า
       const q = await quoteBooking(room, startDatetime, endDatetime);
 
       const booking = (
@@ -410,25 +413,28 @@ router.post(
 );
 
 /* ============================================================
- * Check-in / Check-out / ต่อเวลา (ขอบเขตข้อ 2.6) — ตาราง service_session + extension
+ * Check-in / ต่อเวลา / Check-out (ขอบเขตข้อ 2.6)
+ * ลูกค้ามาถึง = Check-in (สร้างแถวใน service_session) · ต่อเวลา = เพิ่มแถวใน extension · ออก = Check-out
  * ========================================================== */
 
-const CHECKIN_EARLY_MINUTES = 15; // Check-in ได้ก่อนเวลาเริ่มไม่เกินกี่นาที
-const OVERTIME_GRACE_MINUTES = 10; // ออกช้าในแต่ละช่วง 30 นาทีไม่เกินนี้ ไม่คิดเงินช่วงนั้น
-const MAX_EXTEND_MINUTES = 240;
+const CHECKIN_EARLY_MINUTES = 15; // มาถึงก่อนเวลาได้ Check-in ก่อนไม่เกิน 15 นาที
+const OVERTIME_GRACE_MINUTES = 10; // ออกช้าไม่เกิน 10 นาที ไม่คิดเงินเพิ่ม
+const MAX_EXTEND_MINUTES = 240; // ต่อเวลาได้ครั้งละไม่เกิน 4 ชั่วโมง
 
-// จำนวนช่วง 30 นาทีที่ต้องคิดค่าเกินเวลา: ช่วงไหนเลยเข้าไปเกิน 10 นาทีจึงคิด
-// เช่น ออกช้า 10 นาที = 0, 11 นาที = 1 ช่วง, 40 นาที = 1 ช่วง, 41 นาที = 2 ช่วง
+// ออกช้ากี่นาที → ต้องคิดเงินเพิ่มกี่ช่อง (ช่องละ 30 นาที) โดยหัก 10 นาทีแรกที่ไม่คิดเงินออกก่อน
+// เช่น ออกช้า 10 นาที = 0 ช่อง, 11 นาที = 1 ช่อง, 40 นาที = 1 ช่อง, 41 นาที = 2 ช่อง
 function overtimeHalfSlots(minutesLate) {
   return minutesLate > OVERTIME_GRACE_MINUTES ? Math.ceil((minutesLate - OVERTIME_GRACE_MINUTES) / 30) : 0;
 }
 
-// เวลา + จำนวนนาที คำนวณใน DB (ได้สตริงเวลาไทย naive กลับมาตาม type parser ใน db.js)
+// เวลา + จำนวนนาที (ให้ฐานข้อมูลคิด จะได้ข้ามเที่ยงคืน/ข้ามวันได้ถูก) ได้ผลเป็นข้อความเวลาไทย เช่น "2026-10-12T21:30:00"
 async function addMinutes(client, timestamp, minutes) {
   return (await client.query('SELECT $1::timestamp + make_interval(mins => $2) AS t', [timestamp, minutes])).rows[0].t;
 }
 
-// ดึง booking + ห้อง + รอบใช้บริการ แล้วล็อกแถว booking ไว้ตลอด transaction
+// ดึงการจอง + ราคาห้อง + ข้อมูล Check-in และให้ฐานข้อมูลคิดให้ว่า:
+//   checkin_opened = ถึงเวลาที่ Check-in ได้หรือยัง · before_end = ยังไม่เลยเวลาสิ้นสุด · minutes_late = ออกช้ากี่นาที
+// "FOR UPDATE" = ล็อกแถวนี้ไว้จนทำเสร็จ กันแอดมิน 2 คนกดพร้อมกันแล้วข้อมูลซ้ำ
 async function lockBookingWithSession(client, bookingId) {
   return (
     await client.query(
@@ -447,14 +453,15 @@ async function lockBookingWithSession(client, bookingId) {
   ).rows[0];
 }
 
-// ล็อก booking ที่ Check-in แล้วและยังไม่ Check-out (ใช้ตอนต่อเวลา / Check-out)
+// เหมือนข้างบน แต่ต้องเป็นรายการที่ Check-in แล้วและยังไม่ Check-out (ใช้ตอนต่อเวลา / Check-out)
 async function lockActiveSession(client, bookingId, message) {
   const b = await lockBookingWithSession(client, bookingId);
   if (!b || b.session_status !== 'in_progress') throw new HttpError(409, message);
   return b;
 }
 
-// PATCH /api/admin/bookings/:id/check-in
+// PATCH /api/admin/bookings/:id/check-in -- ปุ่ม "Check-in" (ลูกค้ามาถึงร้านแล้ว)
+// ได้เมื่อ: ยืนยันแล้ว + เหลือไม่เกิน 15 นาทีก่อนเวลาเริ่ม (หรือเลยเวลาเริ่มแล้ว) + ยังไม่เลยเวลาสิ้นสุด
 router.patch(
   '/bookings/:id/check-in',
   route(async (req, res) => {
@@ -478,9 +485,9 @@ router.patch(
   }),
 );
 
-// PATCH /api/admin/bookings/:id/extend  { minutes } -- ต่อเวลาทีละ 30 นาที ราคาเดียวกับตอนจอง
-// เลื่อน booking.end_datetime ออกไปจริง ห้องชนกับการจองถัดไปหรือไม่ให้ exclusion constraint (23P01) ตัดสิน
-// และต่อได้ไม่เกินเวลาปิดร้านของวันนั้น (shop_hours.close_hour)
+// PATCH /api/admin/bookings/:id/extend  { minutes } -- ปุ่ม "ต่อเวลา" (ทีละ 30 นาที คิดราคาแบบเดียวกับตอนจอง)
+// เลื่อนเวลาสิ้นสุดของการจองออกไปจริง และบวกเงินเพิ่มเข้ายอดรวม
+// ต่อไม่ได้ถ้า: เกินเวลาปิดร้านวันนั้น หรือมีคนจองห้องนี้ต่อจากเราแล้ว (ฐานข้อมูลตอบ error 23P01)
 router.patch(
   '/bookings/:id/extend',
   route(
@@ -526,8 +533,8 @@ router.patch(
   ),
 );
 
-// PATCH /api/admin/bookings/:id/check-out
-// ออกช้ากว่าเวลาสิ้นสุด คิดค่าเกินเวลาตาม overtimeHalfSlots() ด้วยราคาเดียวกับตอนจอง แล้วปิดงาน booking เป็น completed
+// PATCH /api/admin/bookings/:id/check-out -- ปุ่ม "Check-out" (ลูกค้าออกจากห้อง)
+// ถ้าออกช้ากว่าเวลาสิ้นสุด คิดค่าเกินเวลาตาม overtimeHalfSlots() แล้วเปลี่ยนการจองเป็น "เสร็จสมบูรณ์" (completed)
 router.patch(
   '/bookings/:id/check-out',
   route(async (req, res) => {
@@ -567,14 +574,15 @@ router.patch(
  * ตรวจสอบสลิปการชำระเงิน
  * ========================================================== */
 
-// PATCH /api/admin/payments/:id/verify  { approve, reason }
-// อนุมัติ = มัดจำ paid / ปฏิเสธ = ยกเลิกการจองทันทีพร้อมเหตุผลให้ลูกค้าเห็น และปล่อยช่วงเวลาคืน
-// ตรวจได้เฉพาะสลิปที่ยังรอตรวจ กันการกดซ้ำเปลี่ยนผลที่ตัดสินไปแล้ว
+// PATCH /api/admin/payments/:id/verify  { approve, reason } -- ปุ่ม "ผ่าน" / "ไม่ผ่าน" ของสลิป
+// ผ่าน = รับมัดจำ (แล้วแอดมินกด "ยืนยัน" การจองต่อ)
+// ไม่ผ่าน = ร้านยกเลิกการจองทันที ลูกค้าได้แจ้งเตือนพร้อมเหตุผล และห้องว่างให้คนอื่นจอง
+// ตรวจได้เฉพาะสลิปที่ยังรอตรวจ (กดซ้ำไม่ได้ ผลที่ตัดสินไปแล้วจะไม่เปลี่ยน)
 router.patch(
   '/payments/:id/verify',
   route(async (req, res) => {
     const { approve } = req.body;
-    const reason = (typeof req.body.reason === 'string' && req.body.reason.trim()) || 'สลิปไม่ผ่านการตรวจสอบ';
+    const reason = reasonText(req.body.reason, 'สลิปไม่ผ่านการตรวจสอบ');
     const status = approve === false ? 'rejected' : 'paid';
     const payment = await withTransaction(async (client) => {
       const verified = (
@@ -588,23 +596,23 @@ router.patch(
       ).rows[0];
       if (!verified) throw new HttpError(404, 'ไม่พบรายการชำระเงิน หรือสลิปนี้ตรวจไปแล้ว');
       if (status === 'paid') {
-        // อนุมัติ = รับมัดจำของ booking นี้ทั้งหมด: สลิปอื่นที่ยังรอตรวจ (เช่น สลิปแรกก่อนลูกค้าแก้ไขการจอง) ผ่านไปพร้อมกัน
+        // ผ่าน = รับมัดจำของการจองนี้ทั้งหมด: สลิปอื่นที่ยังรอตรวจของการจองเดียวกัน (เช่น สลิปก่อนลูกค้าแก้ไขการจอง) ผ่านไปด้วย
         await client.query(
           `UPDATE payment SET payment_status = 'paid', verified_by = $2, verified_at = now()
          WHERE booking_id = $1 AND payment_status = 'pending'`,
           [verified.booking_id, req.user.id],
         );
-        // ตรวจผ่านครบยอดมัดจำแล้ว = paid / ยังมีสลิปอื่นรอตรวจ = pending_verify / ยังจ่ายไม่ครบ (แก้ไขการจองแล้วต้องจ่ายเพิ่ม) = unpaid
+        // สถานะมัดจำใหม่: ได้เงินครบแล้ว = paid / ยังมีสลิปอื่นรอตรวจ = pending_verify / ยังไม่ครบ = unpaid
         await client.query(
           `UPDATE booking SET updated_at = now(), deposit_status = CASE
-           WHEN (SELECT COALESCE(SUM(amount), 0) FROM payment WHERE booking_id = $1 AND payment_status = 'paid') >= deposit_required THEN 'paid'
+           WHEN ${paidDepositSql('booking')} >= deposit_required THEN 'paid'
            WHEN EXISTS (SELECT 1 FROM payment WHERE booking_id = $1 AND payment_status = 'pending') THEN 'pending_verify'
            ELSE 'unpaid' END
          WHERE booking_id = $1`,
           [verified.booking_id],
         );
       } else {
-        // การจองยังไม่ถูกยกเลิก = ปฏิเสธสลิปครั้งนี้ทำให้ "ร้านยกเลิก" การจอง / ลูกค้ายกเลิกไปเองแล้ว = แค่สลิปไม่ผ่าน
+        // ถ้าการจองยังไม่ถูกยกเลิก → สลิปไม่ผ่าน = ร้านยกเลิกการจองนี้ / ถ้าลูกค้ายกเลิกไปเองแล้ว → แค่บันทึกว่าสลิปไม่ผ่าน
         const wasActive = ['pending', 'confirmed'].includes(
           (await client.query('SELECT booking_status FROM booking WHERE booking_id = $1', [verified.booking_id]))
             .rows[0]?.booking_status,
@@ -620,14 +628,13 @@ router.patch(
         );
         let extra = `เหตุผล: ${reason}`;
         if (wasActive) {
-          // สลิปอื่นที่ยังค้างของการจองนี้ไม่ผ่านไปด้วย
+          // สลิปอื่นที่ยังค้างตรวจของการจองนี้ ไม่ผ่านไปด้วย
           await rejectPendingSlipsOnShopCancel(client, verified.booking_id, req.user.id);
-          // เคยมีสลิปที่ตรวจผ่านแล้ว (เช่น มัดจำก่อนลูกค้าแก้ไขการจอง) = ร้านต้องคืนเงินส่วนนั้นให้
+          // ถ้าเคยมีสลิปที่ผ่านแล้ว (เช่น มัดจำก่อนลูกค้าแก้ไขการจอง) ร้านต้องคืนเงินส่วนนั้น → บอกในแจ้งเตือน
           const paidBefore = (
-            await client.query(
-              `SELECT COALESCE(SUM(amount), 0) AS n FROM payment WHERE booking_id = $1 AND payment_status = 'paid'`,
-              [verified.booking_id],
-            )
+            await client.query(`SELECT ${paidDepositSql('booking')} AS n FROM booking WHERE booking_id = $1`, [
+              verified.booking_id,
+            ])
           ).rows[0].n;
           extra += ' — การจองนี้ถูกยกเลิก' + (Number(paidBefore) > 0 ? ` · ${REFUND_NOTE}` : '');
         }
@@ -643,17 +650,18 @@ router.patch(
  * ตั้งค่าร้าน (หน้า "ตั้งค่าร้าน")
  * ========================================================== */
 
-// ชื่อฟิลด์พีคไทม์จากฟอร์ม
+// ชื่อช่องพีคไทม์ในฟอร์มตั้งค่าร้าน
 const RATE_KEYS = ['peakStartTime', 'peakEndTime', 'peakSurcharge'];
-// แถวจาก DB → ค่าแบบฟอร์ม (ใช้เติมค่าที่ไม่ได้ส่งมา)
+// ค่าพีคไทม์ปัจจุบันในฐานข้อมูล → รูปแบบเดียวกับฟอร์ม (ใช้เติมช่องที่หน้าเว็บไม่ได้ส่งมา)
 const rateFormFromRow = (row) => ({
   peakStartTime: row.peak_start_time ? String(row.peak_start_time).slice(0, 5) : '',
   peakEndTime: row.peak_end_time ? String(row.peak_end_time).slice(0, 5) : '',
   peakSurcharge: row.peak_surcharge,
 });
 
-// PATCH /api/admin/shop -- ข้อมูลร้าน + พีคไทม์ที่ใช้ทุกวัน (ฟิลด์ที่ไม่ได้ส่งมา = คงค่าเดิม)
-// พีคไทม์: เวลาว่าง '' = ไม่มีพีค (เริ่ม) / ถึงร้านปิด (สิ้นสุด)
+// PATCH /api/admin/shop -- บันทึกข้อมูลร้าน + พีคไทม์ที่ใช้ทุกวัน (ช่องไหนไม่ได้ส่งมา = คงค่าเดิม)
+// พีคไทม์: เวลาเริ่มว่าง = ไม่มีพีค / เวลาสิ้นสุดว่าง = พีคถึงร้านปิด
+// (ในคำสั่ง SQL: COALESCE(ค่าใหม่, ค่าเดิม) = ถ้าไม่ได้ส่งค่าใหม่มาให้ใช้ค่าเดิม)
 router.patch(
   '/shop',
   route(async (req, res) => {
@@ -708,7 +716,7 @@ router.patch(
   }),
 );
 
-// จำนวนชั่วโมงในนโยบาย: 0-72 ทีละครึ่งชั่วโมง (เช่น 1, 1.5, 2) / allowBlank = ช่องว่างได้ (null)
+// ตรวจจำนวนชั่วโมงในนโยบาย: 0-72 ทีละครึ่งชั่วโมง (เช่น 1, 1.5, 2) / allowBlank = ปล่อยว่างได้ (เก็บเป็น null)
 function policyHours(value, label, allowBlank = false) {
   if (allowBlank && (value === '' || value === null || value === undefined)) return null;
   const n = Number(value);
@@ -719,8 +727,9 @@ function policyHours(value, label, allowBlank = false) {
 }
 
 // PATCH /api/admin/policy  { depositPercent, cancelHoursBefore, allowEditBeforeHours, refundPolicyDesc, noShowPolicyDesc }
-// -- ตั้งค่านโยบายมัดจำ/ยกเลิก/แก้ไข/No-show (ขอบเขตข้อ 2.3)
-// บันทึกเป็นนโยบายฉบับใหม่ (ปิดฉบับเดิมด้วย effective_to) — การจองที่ทำไปแล้วยังใช้นโยบายตอนที่จอง (booking.policy_id)
+// -- การ์ด "นโยบายมัดจำและการยกเลิก" ในหน้าตั้งค่าร้าน (ขอบเขตข้อ 2.3)
+// ไม่แก้ฉบับเดิม แต่สร้าง "นโยบายฉบับใหม่" ทุกครั้ง (ฉบับเดิมถูกปิดด้วย effective_to)
+// เหตุผล: การจองที่ทำไปแล้วต้องใช้นโยบาย ณ ตอนที่จอง (เก็บไว้ใน booking.policy_id) ไม่ใช่นโยบายใหม่
 router.patch(
   '/policy',
   route(async (req, res) => {
@@ -750,13 +759,14 @@ router.patch(
 
 const DAY_NAMES = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
 
-// PATCH /api/admin/shop/hours   { hours: [{ dayOfWeek, openHour, closeHour }, ...] }
+// PATCH /api/admin/shop/hours   { hours: [{ dayOfWeek, openHour, closeHour, customRates, ...พีคไทม์ }, ...] }
+// -- การ์ด "เวลาเปิด-ปิดร้าน" (แยกแต่ละวัน) + พีคไทม์เฉพาะวัน
 router.patch(
   '/shop/hours',
   route(async (req, res) => {
     const { hours } = req.body;
     if (!Array.isArray(hours) || !hours.length) throw new HttpError(400, 'ต้องส่ง hours เป็น array');
-    // วัน 0-6 (อาทิตย์-เสาร์) / ชั่วโมง 0-24 / เวลาเปิดต้องก่อนเวลาปิด (เปิด = ปิด หมายถึงปิดทั้งวัน)
+    // ตรวจก่อนบันทึก: วัน 0-6 (อาทิตย์-เสาร์) / ชั่วโมง 0-24 / เวลาเปิดต้องไม่เกินเวลาปิด (เปิด = ปิด แปลว่าปิดทั้งวัน)
     const isInt = (v, min, max) => Number.isInteger(v) && v >= min && v <= max;
     for (const h of hours) {
       if (!isInt(h?.dayOfWeek, 0, 6)) throw new HttpError(400, 'วันในสัปดาห์ต้องเป็น 0-6 (อาทิตย์-เสาร์)');
@@ -775,7 +785,7 @@ router.patch(
           'UPDATE shop_hours SET open_hour = $1, close_hour = $2 WHERE shop_id = $3 AND day_of_week = $4',
           [h.openHour, h.closeHour, shop.shop_id, h.dayOfWeek],
         );
-        // พีคไทม์เฉพาะวันนี้: customRates = true ใช้ค่าที่ส่งมา / false = ใช้ค่าหลักของร้าน / ไม่ส่ง = คงเดิม
+        // พีคไทม์เฉพาะวันนี้: customRates = true ใช้ค่าที่ส่งมา / false = กลับไปใช้ค่าหลักของร้าน / ไม่ส่งมา = คงเดิม
         if (h.customRates === undefined) continue;
         const label = `วัน${DAY_NAMES[h.dayOfWeek]}: `;
         const rates = h.customRates ? parseRates(h, label) : null;
@@ -804,7 +814,7 @@ router.patch(
  * ประเภทห้อง (หน้า "ประเภทห้อง") — S/M/L/XL หรือประเภทที่แอดมินเพิ่มเอง
  * ========================================================== */
 
-// ตัดช่องว่างหัวท้าย + จำกัดความยาว (ข้อความที่ไม่ได้ส่งมาคงเป็น undefined → COALESCE เก็บค่าเดิม)
+// ตัดช่องว่างหัวท้าย + เช็คความยาว (ถ้าไม่ได้ส่งมา จะคืน undefined → ตอนบันทึกจะใช้ค่าเดิม)
 function trimmedText(value, maxLength, label) {
   if (typeof value !== 'string') return value;
   const text = value.trim();
@@ -812,7 +822,7 @@ function trimmedText(value, maxLength, label) {
   return text;
 }
 
-// ราคาต่อชั่วโมง: มากกว่า 0 ไม่เกิน 100,000 บาท (ราคา 0 = มัดจำ 0 → ลูกค้าจ่ายมัดจำไม่ได้ การจองจะถูกยกเลิกเอง)
+// ราคาต่อชั่วโมง: มากกว่า 0 และไม่เกิน 100,000 บาท (ห้ามราคา 0 เพราะมัดจำจะเป็น 0 ลูกค้าจ่ายมัดจำไม่ได้)
 function parsePrice(value, label) {
   const n = Number(value);
   if (value === '' || value === null || !Number.isFinite(n) || n <= 0 || n > 100000) {
@@ -830,7 +840,7 @@ function parseCapacity(value, label) {
   return n;
 }
 
-// ตรวจข้อมูลประเภทห้องจากฟอร์ม (ใช้ทั้งเพิ่มและแก้ไข — แก้ไขต้องส่งมาครบทุกช่องเหมือนกัน)
+// ตรวจข้อมูลประเภทห้องจากฟอร์ม (ใช้ทั้งตอนเพิ่มและตอนแก้ไข — ต้องส่งมาครบทุกช่อง)
 function parseRoomTypeBody(body) {
   const code = typeof body.code === 'string' ? body.code.trim().toUpperCase() : '';
   if (!/^[A-Z0-9-]{1,10}$/.test(code)) {
@@ -888,8 +898,8 @@ router.post(
 );
 
 // PATCH /api/admin/room-types/:id  { code, name, capacityMin, capacityMax, basePricePerHour, description, applyToRoomIds }
-// applyToRoomIds = ห้องธรรมดาในประเภทนี้ที่แอดมินเลือกให้เปลี่ยนเป็นราคาใหม่ (ไม่ส่ง/[] = ไม่เปลี่ยนราคาห้องไหน)
-// ห้องธีมไม่ถูกเปลี่ยนราคาจากตรงนี้เด็ดขาด (ห้องธีมแอดมินตั้งราคาเองที่หน้าตั้งค่าห้อง)
+// applyToRoomIds = ห้องธรรมดาที่แอดมินติ๊กให้เปลี่ยนเป็นราคาใหม่ของประเภทนี้ (ไม่ติ๊กเลย = ไม่เปลี่ยนราคาห้องไหน)
+// ห้องธีมจะไม่ถูกเปลี่ยนราคาจากตรงนี้เด็ดขาด (ราคาห้องธีมแอดมินตั้งเองรายห้องที่หน้าตั้งค่าห้อง)
 router.patch(
   '/room-types/:id',
   route(async (req, res) => {
@@ -921,7 +931,7 @@ router.patch(
   }, ROOM_TYPE_ERRORS),
 );
 
-// DELETE /api/admin/room-types/:id -- ลบได้เฉพาะประเภทที่ไม่มีห้องแล้ว
+// DELETE /api/admin/room-types/:id -- ลบประเภทห้อง (ลบได้เฉพาะประเภทที่ไม่มีห้องเหลืออยู่แล้ว)
 router.delete(
   '/room-types/:id',
   route(
@@ -938,7 +948,7 @@ router.delete(
  * ตั้งค่าห้อง (หน้า "ตั้งค่าห้อง")
  * ========================================================== */
 
-// ห้อง 1 ห้องพร้อมข้อมูลประเภท (type_base_price = ราคาห้องธรรมดาของประเภท ไว้ให้หน้าเว็บเทียบ)
+// ข้อมูลห้องพร้อมประเภท (type_base_price = ราคาห้องธรรมดาของประเภทนั้น ไว้ให้หน้าเว็บเทียบว่าห้องนี้ราคาต่างไหม)
 const ADMIN_ROOM_SQL = `
   SELECT r.*, ${ROOM_TYPE_COLUMNS}, t.base_price_per_hour AS type_base_price
   FROM room r ${joinRoomType('r')}`;
@@ -962,7 +972,7 @@ router.get(
 );
 
 // PATCH /api/admin/rooms/:id  { roomName, typeId, capacity, pricePerHour, imageUrl, isActive, description, theme }
-// theme: '' = ห้องธรรมดา / มีชื่อ = ห้องธีม / ไม่ส่ง = คงเดิม
+// theme (ชื่อธีม): ว่าง = ห้องธรรมดา / มีชื่อ = ห้องธีม / ไม่ส่งมา = คงเดิม · ช่องอื่นที่ไม่ได้ส่งมา = คงค่าเดิม
 router.patch(
   '/rooms/:id',
   route(
@@ -993,7 +1003,7 @@ router.patch(
   ),
 );
 
-// สร้างห้องใหม่ 1 ห้องตามประเภท — ความจุ/ราคาใช้ค่าของประเภทเป็นค่าเริ่มต้น (ห้องธรรมดา)
+// สร้างห้องใหม่ 1 ห้องในประเภทนี้ — ความจุและราคาเริ่มต้นใช้ค่าของประเภท (เป็นห้องธรรมดา)
 async function insertRoom(db, type, roomName) {
   const shop = await getShop(db);
   const room = (
@@ -1010,8 +1020,8 @@ async function insertRoom(db, type, roomName) {
 const BULK_MAX_PER_TYPE = 20;
 const BULK_MAX_TOTAL = 50;
 
-// POST /api/admin/rooms/bulk  { items: [{ typeId, count }, ...] } -- เพิ่มห้องธรรมดาทีละหลายห้องตามประเภท
-// ตั้งชื่ออัตโนมัติเป็น <รหัสประเภท>-<เลข 2 หลัก> ต่อจากเลขที่มากที่สุดที่มีอยู่แล้ว เช่น S-01, S-02 (แก้ชื่อทีหลังได้)
+// POST /api/admin/rooms/bulk  { items: [{ typeId, count }, ...] } -- ปุ่ม "เพิ่มห้องตามประเภท" (เพิ่มทีละหลายห้อง)
+// ตั้งชื่อให้อัตโนมัติ เช่น มี S-01, S-02 อยู่แล้ว เพิ่มอีก 2 ห้อง → S-03, S-04 (แก้ชื่อทีหลังได้)
 router.post(
   '/rooms/bulk',
   route(async (req, res) => {
@@ -1032,7 +1042,7 @@ router.post(
       const rooms = [];
       for (const it of wanted) {
         const type = await getRoomType(client, it.typeId);
-        // เลขล่าสุดของชื่อแบบ "S-01" ในประเภทนี้ (ชื่อที่แอดมินเปลี่ยนไปแล้วไม่นับ)
+        // หาเลขที่มากที่สุดของชื่อแบบ "S-01" ในประเภทนี้ (ห้องที่แอดมินเปลี่ยนชื่อไปแล้วไม่นับ)
         const last = (
           await client.query(
             `SELECT COALESCE(MAX(substring(room_name FROM '^' || $1 || '-([0-9]+)$')::int), 0) AS n
@@ -1050,7 +1060,7 @@ router.post(
   }),
 );
 
-// DELETE /api/admin/rooms/:id -- ลบห้อง (ห้องที่มีประวัติการจองผูกอยู่ลบไม่ได้ ให้ปิดให้บริการแทน)
+// DELETE /api/admin/rooms/:id -- ลบห้อง (ห้องที่เคยมีการจองแล้วลบไม่ได้ ให้กด "ปิดให้บริการ" แทน)
 router.delete(
   '/rooms/:id',
   route(
@@ -1067,14 +1077,14 @@ router.delete(
  * รายงาน (หน้า "รายงาน" รายวัน/รายสัปดาห์/รายเดือน)
  * ========================================================== */
 
-// ช่วงข้อมูลของแต่ละ period — ต้องตรงกับ RANGE_LABEL ในหน้ารายงานฝั่ง frontend (AdminReportsPage)
+// ย้อนหลังกี่วัน/สัปดาห์/เดือน ของแต่ละแบบรายงาน — ต้องตรงกับ RANGE_LABEL ในหน้ารายงาน (AdminReportsPage)
 const REPORT_RANGE_START = {
   day: `CURRENT_DATE - 6`, // 7 วันล่าสุด (รวมวันนี้)
   week: `date_trunc('week', CURRENT_DATE)::date - 21`, // 4 สัปดาห์ล่าสุด (รวมสัปดาห์นี้)
   month: `(date_trunc('month', CURRENT_DATE) - interval '5 months')::date`, // 6 เดือนล่าสุด (รวมเดือนนี้)
 };
 
-// GET /api/admin/reports?period=day|week|month
+// GET /api/admin/reports?period=day|week|month -- หน้า "รายงานสรุป": รายได้ตามช่วงเวลา, แยกตามห้อง และยอดรวม
 router.get(
   '/reports',
   route(async (req, res) => {

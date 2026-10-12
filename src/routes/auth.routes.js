@@ -1,4 +1,6 @@
-// API เข้าสู่ระบบ (/api/auth/...) — สมัครสมาชิก/ล็อกอินลูกค้า, ตั้งรหัสผ่านครั้งแรก, ล็อกอินแอดมิน
+// API เข้าสู่ระบบ (/api/auth/...)
+// มี 4 อย่าง: ลูกค้าสมัครสมาชิก, ลูกค้าล็อกอิน, ลูกค้าเก่าตั้งรหัสผ่านครั้งแรก, แอดมินล็อกอิน
+// ทุกแบบถ้าสำเร็จจะได้ token กลับไป (ดู utils/auth.js)
 const router = require('express').Router();
 const rateLimit = require('express-rate-limit');
 const { pool } = require('../db');
@@ -6,8 +8,8 @@ const { HttpError, route } = require('../utils/http');
 const { signToken } = require('../utils/auth');
 const { normalizePhone, checkName, checkPassword } = require('../utils/validate');
 
-// จำกัดจำนวนครั้ง login/register ต่อ IP กัน brute-force เดารหัสผ่าน
-// นับเฉพาะครั้งที่ไม่สำเร็จ — ลูกค้าหลายคนใช้ wifi ร้านเดียวกัน (IP เดียวกัน) ล็อกอินถูกต้องได้ไม่จำกัด
+// กันคนสุ่มเดารหัสผ่าน: กรอกผิดได้ไม่เกิน 10 ครั้งใน 15 นาที (นับต่อเครื่อง/IP)
+// นับเฉพาะครั้งที่ผิด — ลูกค้าหลายคนใช้ wifi ร้านเดียวกัน ถ้าล็อกอินถูกก็ไม่โดนนับ
 router.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -21,7 +23,7 @@ router.use(
 
 const CUSTOMER_FIELDS = 'user_id, name, phone, avatar_url';
 
-// ผลลัพธ์ของการเข้าสู่ระบบลูกค้า = ข้อมูลผู้ใช้ + token (แนบไปกับทุก request ที่ต้องล็อกอิน)
+// ผลลัพธ์ตอนล็อกอินสำเร็จ = ข้อมูลผู้ใช้ + token (หน้าเว็บเก็บ token ไว้แนบไปกับทุกคำขอที่ต้องล็อกอิน)
 const withToken = (user, role) => ({ ...user, token: signToken(user.user_id, role) });
 
 // POST /api/auth/register  { name, phone, password }  -- สมัครสมาชิกลูกค้า
@@ -45,8 +47,9 @@ router.post(
   ),
 );
 
-// POST /api/auth/login  { phone, password }  -- ลูกค้าเข้าสู่ระบบ
-// บัญชีเดิมที่ยังไม่เคยตั้งรหัสผ่าน → 409 code PASSWORD_NOT_SET ให้หน้าเว็บพาไปตั้งรหัสผ่านครั้งแรก
+// POST /api/auth/login  { phone, password }  -- ลูกค้าเข้าสู่ระบบด้วยเบอร์โทร + รหัสผ่าน
+// บัญชีเก่าที่ยังไม่เคยตั้งรหัสผ่าน → ตอบ 409 พร้อม code PASSWORD_NOT_SET ให้หน้าเว็บพาไปตั้งรหัสผ่านก่อน
+// (ฐานข้อมูลเทียบรหัสผ่านให้เองด้วย crypt() เราไม่เคยเห็นรหัสผ่านจริงที่เก็บไว้)
 router.post(
   '/login',
   route(async (req, res) => {
@@ -69,8 +72,8 @@ router.post(
   }),
 );
 
-// POST /api/auth/set-password  { phone, name, password }  -- ตั้งรหัสผ่านครั้งแรก (เฉพาะบัญชีเดิมที่ยังไม่มีรหัสผ่าน)
-// ต้องกรอกชื่อที่ลงทะเบียนไว้ให้ตรงด้วย กันคนที่รู้แค่เบอร์มาตั้งรหัสผ่านแทนเจ้าของบัญชี
+// POST /api/auth/set-password  { phone, name, password }  -- ตั้งรหัสผ่านครั้งแรก (เฉพาะบัญชีเก่าที่ยังไม่มีรหัสผ่าน)
+// ต้องกรอกชื่อให้ตรงกับที่ลงทะเบียนไว้ด้วย (ไม่สนช่องว่าง/ตัวพิมพ์เล็กใหญ่) กันคนที่รู้แค่เบอร์มาตั้งรหัสแทนเจ้าของ
 router.post(
   '/set-password',
   route(async (req, res) => {

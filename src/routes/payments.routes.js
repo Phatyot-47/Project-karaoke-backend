@@ -1,4 +1,4 @@
-// API การชำระเงิน (/api/payments) — ลูกค้าแนบสลิปโอนมัดจำ รอแอดมินตรวจ
+// API การชำระเงิน (/api/payments) — ลูกค้าแนบสลิปโอนมัดจำ แล้วรอแอดมินตรวจ
 const router = require('express').Router();
 const { withTransaction } = require('../db');
 const { HttpError, route } = require('../utils/http');
@@ -6,14 +6,14 @@ const { expireStalePendingBookings } = require('../utils/expireBookings');
 const { submittedDepositSql } = require('../utils/deposit');
 const { requireCustomer } = require('../utils/auth');
 
-// ลิงก์สลิปต้องเป็นไฟล์ที่อัปโหลดผ่าน POST /api/uploads ของระบบนี้เท่านั้น
+// ลิงก์สลิปต้องเป็นไฟล์ที่อัปโหลดผ่านระบบนี้ (/uploads/...) เท่านั้น
 const isUploadedFile = (url) =>
   typeof url === 'string' && url.length <= 500 && /^(https?:\/\/[^/]+)?\/uploads\/[\w.-]+$/.test(url);
 
 // POST /api/payments  { bookingId, method, evidenceUrl }
-// -- ลูกค้าแนบสลิปการโอนเงินมัดจำ (หน้า "ยืนยันและชำระมัดจำ")
-// ยอดเงินคิดจาก DB เสมอ (ไม่เชื่อ amount จากฝั่งลูกค้า) = มัดจำที่ต้องจ่าย - ที่ส่งสลิปมาแล้ว
-// (ปกติคือมัดจำเต็มจำนวน / หลังลูกค้าแก้ไขการจองจนมัดจำเพิ่มขึ้น คือส่วนต่างที่ต้องจ่ายเพิ่ม)
+// -- ลูกค้าแนบสลิปโอนมัดจำ (หน้า "ยืนยันและชำระมัดจำ")
+// ยอดเงินระบบคิดเองจากฐานข้อมูล (ไม่เชื่อยอดที่หน้าเว็บส่งมา กันลูกค้าแก้ตัวเลข)
+// ยอด = มัดจำที่ต้องจ่าย - ที่ส่งสลิปมาแล้ว (ปกติ = มัดจำเต็ม / หลังแก้ไขการจองจนมัดจำสูงขึ้น = ส่วนต่าง)
 router.post(
   '/',
   requireCustomer,

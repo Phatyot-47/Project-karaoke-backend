@@ -1,5 +1,5 @@
 // API แจ้งเตือนของลูกค้า (/api/notifications) — ไอคอนกระดิ่งบนเมนูลูกค้า
-// ดู/กดอ่านได้เฉพาะแจ้งเตือนของตัวเอง (แจ้งเตือนถูกสร้างตอนร้าน/ระบบเปลี่ยนสถานะการจอง ดู utils/notify.js)
+// ลูกค้าเห็นและกดอ่านได้เฉพาะแจ้งเตือนของตัวเอง (แจ้งเตือนถูกสร้างตอนร้าน/ระบบเปลี่ยนสถานะการจอง ดู utils/notify.js)
 const router = require('express').Router();
 const { pool } = require('../db');
 const { HttpError, route } = require('../utils/http');
