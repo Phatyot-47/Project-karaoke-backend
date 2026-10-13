@@ -38,4 +38,22 @@ function isStartInPast(startDatetime) {
   return startMinutesOfDay + PAST_SLOT_GRACE_MINUTES <= now.minutesOfDay; // วันนี้: เทียบนาที
 }
 
-module.exports = { NAIVE_DATETIME_RE, isStartInPast };
+/** วันที่วันนี้ตามเวลาไทย "YYYY-MM-DD" */
+function bangkokTodayISO() {
+  return bangkokNowParts().dateISO;
+}
+
+/**
+ * วันเวลา → จำนวนนาทีนับจากเที่ยงคืนของวัน dateISO (ข้ามไปวันถัดไปก็นับต่อ)
+ * เช่น ("2026-10-12", "2026-10-12T19:30:00") → 1170 / ("2026-10-12", "2026-10-13T00:00:00") → 1440
+ * รูปแบบผิด หรือมีวินาทีที่ไม่ใช่ 00 → NaN
+ */
+function minutesFromDayStart(dateISO, datetime) {
+  const match = typeof datetime === 'string' && datetime.match(NAIVE_DATETIME_RE);
+  if (!match || (match[6] !== undefined && match[6] !== '00')) return NaN;
+  const [y, mo, d, h, mi] = match.slice(1, 6).map(Number);
+  const [dy, dm, dd] = dateISO.split('-').map(Number);
+  return (Date.UTC(y, mo - 1, d, h, mi) - Date.UTC(dy, dm - 1, dd)) / 60000;
+}
+
+module.exports = { NAIVE_DATETIME_RE, isStartInPast, bangkokTodayISO, minutesFromDayStart };
