@@ -1,4 +1,5 @@
 // API หน้า "ข้อมูลส่วนตัว" ของลูกค้า (/api/users/...) — แก้ชื่อ/เบอร์/รูปโปรไฟล์ และเปลี่ยนรหัสผ่าน
+// (SQL ในไฟล์นี้: $1, JOIN, COALESCE, RETURNING ฯลฯ ดูคำอธิบายพื้นฐานที่ routes/bookings.routes.js)
 const router = require('express').Router();
 const { pool } = require('../db');
 const { HttpError, route } = require('../utils/http');
@@ -29,6 +30,7 @@ router.patch(
       if (changeAvatar && !isAvatarUrl(avatarUrl)) throw new HttpError(400, 'ลิงก์รูปโปรไฟล์ไม่ถูกต้อง');
       const user = (
         await pool.query(
+          // avatar_url: $4 = หน้าเว็บส่งรูปมาไหม → ส่งมาใช้รูปใหม่ ('' = ลบรูป กลายเป็น NULL) / ไม่ส่ง → คงรูปเดิม
           `UPDATE users SET name = $2, phone = $3,
        avatar_url = CASE WHEN $4::boolean THEN NULLIF($5::text, '') ELSE avatar_url END
      WHERE user_id = $1 AND role = 'customer'
@@ -52,6 +54,7 @@ router.patch(
     checkPassword(newPassword, 'รหัสผ่านใหม่');
     const updated = (
       await pool.query(
+        // เปลี่ยนรหัสได้เฉพาะเมื่อรหัสเดิมถูก (เงื่อนไข crypt($2, ...) อยู่ใน WHERE) — ผิด = ไม่มีแถวถูกแก้ → ตอบ error
         `UPDATE users SET password_hash = crypt($3, gen_salt('bf'))
      WHERE user_id = $1 AND role = 'customer' AND password_hash = crypt($2, password_hash)
      RETURNING user_id`,

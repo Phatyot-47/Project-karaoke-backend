@@ -1,4 +1,5 @@
 // API การชำระเงิน (/api/payments) — ลูกค้าแนบสลิปโอนมัดจำ แล้วรอแอดมินตรวจ
+// (SQL ในไฟล์นี้: $1, JOIN, COALESCE, RETURNING ฯลฯ ดูคำอธิบายพื้นฐานที่ routes/bookings.routes.js)
 const router = require('express').Router();
 const { withTransaction } = require('../db');
 const { HttpError, route } = require('../utils/http');

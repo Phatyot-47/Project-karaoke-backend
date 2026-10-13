@@ -1,6 +1,7 @@
 // API เข้าสู่ระบบ (/api/auth/...)
 // มี 4 อย่าง: ลูกค้าสมัครสมาชิก, ลูกค้าล็อกอิน, ลูกค้าเก่าตั้งรหัสผ่านครั้งแรก, แอดมินล็อกอิน
 // ทุกแบบถ้าสำเร็จจะได้ token กลับไป (ดู utils/auth.js)
+// (SQL ในไฟล์นี้: $1, JOIN, COALESCE, RETURNING ฯลฯ ดูคำอธิบายพื้นฐานที่ routes/bookings.routes.js)
 const router = require('express').Router();
 const rateLimit = require('express-rate-limit');
 const { pool } = require('../db');

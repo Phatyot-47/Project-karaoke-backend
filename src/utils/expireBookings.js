@@ -15,6 +15,8 @@ const HOLD_MINUTES = 5; // ล็อกเวลาไว้ให้ 5 นา�
 async function expireStalePendingBookings() {
   await pool.query(
     `
+// WITH expired AS (...) = ทำ UPDATE ก่อนแล้วตั้งชื่อผลว่า expired (เลขการจองที่เพิ่งยกเลิก)
+// จากนั้น INSERT แจ้งเตือนให้ลูกค้าของการจองเหล่านั้น — 2 ขั้นในคำสั่ง SQL เดียว
     WITH expired AS (
     UPDATE booking
     SET booking_status = 'cancelled',

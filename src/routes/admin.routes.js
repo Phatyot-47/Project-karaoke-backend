@@ -4,6 +4,7 @@
 //   3. ตรวจสลิป
 //   4. ตั้งค่าร้าน (ข้อมูลร้าน, พีคไทม์, นโยบาย, เวลาเปิด-ปิด)
 //   5. ประเภทห้อง   6. ตั้งค่าห้อง   7. รายงานรายได้
+// (SQL ในไฟล์นี้: $1, JOIN, COALESCE, RETURNING ฯลฯ ดูคำอธิบายพื้นฐานที่ routes/bookings.routes.js)
 const router = require('express').Router();
 const { pool, withTransaction } = require('../db');
 const { HttpError, route } = require('../utils/http');
@@ -28,6 +29,7 @@ router.use(requireAdmin);
 
 // ข้อมูลที่หน้าอนุมัติการจองและหน้าประวัติใช้ร่วมกัน (เขียนไว้ที่เดียว 2 หน้าจะได้เหมือนกัน):
 // ข้อมูลการจอง + ชื่อห้อง + ชื่อ/เบอร์ลูกค้า + สลิปล่าสุด + ยอดมัดจำที่ส่งมาแล้ว + ข้อมูล Check-in/out
+// slip_urls: json_agg = รวมลิงก์สลิปทุกใบของการจองนี้เป็น array เดียว (จ่ายส่วนต่างอาจมีหลายใบ)
 const BOOKING_LIST_COLUMNS = `
   b.*, r.room_name, r.image_url, COALESCE(u.name, b.walkin_name) AS customer_name,
   COALESCE(u.phone, b.walkin_phone) AS customer_phone,
@@ -36,6 +38,8 @@ const BOOKING_LIST_COLUMNS = `
   ${submittedDepositSql('b')} AS paid_amount,
   (SELECT json_agg(evidence_url ORDER BY payment_id) FROM payment
    WHERE payment.booking_id = b.booking_id AND payment_status IN ('pending','paid') AND evidence_url IS NOT NULL) AS slip_urls`;
+// LEFT JOIN users: วอล์คอินไม่มีบัญชีลูกค้า (ใช้ชื่อ/เบอร์ walkin_* แทนผ่าน COALESCE ด้านบน)
+// LEFT JOIN LATERAL ... p: ต่อเฉพาะ "สลิปล่าสุด" 1 ใบของแต่ละการจอง (ORDER BY payment_id DESC LIMIT 1)
 const BOOKING_LIST_JOINS = `
   FROM booking b
   JOIN room r ON r.room_id = b.room_id
@@ -69,6 +73,8 @@ router.get(
   '/bookings/today',
   route(async (req, res) => {
     await expireStalePendingBookings();
+    // ตัวเลขการ์ดสรุปวันนี้ในคำสั่งเดียว: COUNT(*) FILTER (WHERE ...) = นับเฉพาะแถวที่ตรงเงื่อนไข
+    // รายได้ = SUM ตามวิธีนับใน revenueSql เฉพาะรายการที่นับเป็นรายได้ (revenueFilter)
     const stats = await pool.query(`
     SELECT
       COUNT(*) FILTER (WHERE booking_status = 'pending')   AS pending_count,
@@ -78,6 +84,8 @@ router.get(
       (SELECT COUNT(*) FROM booking o WHERE ${OVERDUE_SQL}) AS overdue_count
     FROM booking
     WHERE booking_date = CURRENT_DATE`);
+    // รายการจอง + ยอดต่อเวลารวมของแต่ละห้อง (LEFT JOIN LATERAL รวม SUM จากตาราง extension)
+    // is_overdue = วันที่จองผ่านไปแล้วและยังไม่ Check-in → หน้าเว็บแยกเป็นกลุ่ม "ค้างจากวันก่อน"
     const list = await pool.query(`
     SELECT ${BOOKING_LIST_COLUMNS},
       COALESCE(x.extend_minutes, 0) AS extended_minutes, COALESCE(x.extra_amount, 0) AS extension_amount,
@@ -267,6 +275,8 @@ router.patch(
     const booking = await withTransaction(async (client) => {
       const updated = (
         await client.query(
+          // รูปแบบ "UPDATE ... WHERE เงื่อนไขสถานะ ... RETURNING *" = เช็กเงื่อนไขกับแก้ข้อมูลในคำสั่งเดียว
+          // ถ้าไม่ตรงเงื่อนไข (เช่น Check-in ไปแล้ว) จะไม่มีแถวถูกแก้ → ได้ undefined → ตอบ 404 (ใช้แบบนี้หลายจุดในไฟล์)
           `UPDATE booking SET booking_status = 'cancelled', cancel_reason = $2, cancelled_by = 'shop', updated_at = now()
            WHERE booking_id = $1 AND booking_status IN ('pending','confirmed')
              AND NOT EXISTS (SELECT 1 FROM service_session s WHERE s.booking_id = booking.booking_id)
@@ -587,6 +597,8 @@ router.patch(
     const payment = await withTransaction(async (client) => {
       const verified = (
         await client.query(
+          // $2::varchar = บอกชนิดข้อมูลให้ชัด (ฐานข้อมูลเดาชนิดของ $2 เองไม่ได้เมื่อใช้ซ้ำหลายที่)
+          // remark: ไม่ผ่าน → บันทึกเหตุผล / ผ่าน → คงค่าเดิม (CASE WHEN)
           `UPDATE payment SET payment_status = $2::varchar, verified_by = $3, verified_at = now(),
          remark = CASE WHEN $2::varchar = 'rejected' THEN $4::text ELSE remark END
        WHERE payment_id = $1 AND payment_status = 'pending'
@@ -677,6 +689,8 @@ router.patch(
       }
       return (
         await client.query(
+          // COALESCE($1, name) = ถ้าหน้าเว็บไม่ได้ส่งช่องนี้มา ($1 เป็น NULL) → คงค่าเดิม / ส่งมา → ใช้ค่าใหม่
+          // พีคไทม์ใช้ CASE WHEN $10 แทน เพราะต้องลบค่าเป็น "ว่าง" ได้ ($10 = หน้าเว็บส่งพีคไทม์มาไหม)
           `UPDATE shop SET
              name = COALESCE($1, name),
              tax_id = COALESCE($2, tax_id),
@@ -867,6 +881,8 @@ const ROOM_TYPE_ERRORS = { 23505: [409, 'รหัสประเภทนี้
 router.get(
   '/room-types',
   route(async (req, res) => {
+    // นับห้องของแต่ละประเภท: LEFT JOIN (ประเภทที่ยังไม่มีห้องก็ยังได้แถว นับเป็น 0) + GROUP BY รวมผลทีละประเภท
+    // ::int = แปลงผลนับเป็นตัวเลขธรรมดา (ปกติ COUNT ได้ชนิดตัวเลขใหญ่ ซึ่งไลบรารีส่งกลับมาเป็นข้อความ)
     const types = await pool.query(
       `SELECT t.*,
               COUNT(r.room_id)::int AS room_count,
@@ -919,6 +935,8 @@ router.patch(
         )
       ).rows[0];
       if (!type) throw new HttpError(404, 'ไม่พบประเภทห้อง');
+      // เปลี่ยนราคาเฉพาะห้องธรรมดาที่แอดมินติ๊ก: room_id = ANY($3::int[]) = room_id อยู่ในรายการ ids ไหม
+      // updated.rowCount = จำนวนแถวที่ถูกแก้ (ส่งกลับให้หน้าเว็บแจ้ง "เปลี่ยนราคาแล้ว n ห้อง")
       const updated = await client.query(
         `UPDATE room SET price_per_hour = $2
          WHERE type_id = $1 AND theme IS NULL AND room_id = ANY($3::int[])
@@ -983,6 +1001,8 @@ router.patch(
         req.body.pricePerHour === undefined ? undefined : parsePrice(req.body.pricePerHour, 'ราคาต่อชั่วโมง');
       const description = trimmedText(req.body.description, 300, 'หมายเหตุ');
       const theme = trimmedText(req.body.theme, 100, 'ธีมห้อง');
+      // COALESCE = ไม่ส่งมาคงค่าเดิม (ดู UPDATE shop) / theme: ไม่ส่งมา (NULL) คงเดิม, ส่ง '' มา = เปลี่ยนเป็นห้องธรรมดา
+      // (NULLIF(x, '') = ถ้า x เป็นข้อความว่างให้เป็น NULL)
       const updated = await pool.query(
         `UPDATE room SET
            room_name = COALESCE($1, room_name),
@@ -1090,6 +1110,8 @@ router.get(
   route(async (req, res) => {
     const period = ['day', 'week', 'month'].includes(req.query.period) ? req.query.period : 'day';
     const inRange = (a) => `${revenueFilter(a)} AND ${a}.booking_date >= ${REPORT_RANGE_START[period]}`;
+    // รายได้ตามช่วงเวลา: date_trunc('week', วันที่) = ปัดวันที่ลงเป็นวันแรกของสัปดาห์ (หรือเดือน/วัน ตาม $1)
+    // GROUP BY 1 ORDER BY 1 = รวมยอดและเรียงตามคอลัมน์ที่ 1 (period)
     const trend = await pool.query(
       `SELECT date_trunc($1, booking_date::timestamp) AS period, SUM(${revenueSql('booking')}) AS revenue, COUNT(*) AS bookings
      FROM booking WHERE ${inRange('booking')}

@@ -1,5 +1,6 @@
 // API ข้อมูลห้องสำหรับลูกค้า (/api/rooms/...) — ไม่ต้องล็อกอินก็ดูได้
 // มี: รายการห้อง (กรองประเภท/ค้นหาห้องว่างได้), รายละเอียดห้องเดียว, ช่วงเวลาที่ถูกจองไปแล้วของห้อง
+// (SQL ในไฟล์นี้: $1, JOIN, COALESCE, RETURNING ฯลฯ ดูคำอธิบายพื้นฐานที่ routes/bookings.routes.js)
 const router = require('express').Router();
 const { pool } = require('../db');
 const { HttpError, route } = require('../utils/http');
@@ -23,6 +24,8 @@ router.get(
     if (hasRange) {
       await expireStalePendingBookings();
       params.push(start, end);
+      // is_available = "ไม่มี" การจอง pending/confirmed ของห้องนี้ที่ทับช่วงที่ค้นหา (NOT EXISTS)
+      // สองช่วงเวลาทับกัน = เริ่มของอันหนึ่ง < จบของอีกอัน และ จบ > เริ่ม
       availabilitySql = `, NOT EXISTS (
         SELECT 1 FROM booking b
         WHERE b.room_id = r.room_id AND b.booking_status IN ('pending','confirmed')
@@ -35,6 +38,7 @@ router.get(
                WHERE r.is_active = true`;
     if (size && size !== 'all') {
       params.push(String(size).toUpperCase());
+      // เติมเงื่อนไขทีหลัง: เลข $ ต้องเรียงตามลำดับใน params ($${params.length} = เลขของค่าที่เพิ่ง push)
       sql += ` AND t.code = $${params.length}`;
     }
     // เรียงตามประเภท (เล็ก → ใหญ่) แล้วตามราคา (ถูก → แพง)

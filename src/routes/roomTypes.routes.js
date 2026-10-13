@@ -1,5 +1,6 @@
 // API ประเภทห้องแบบสาธารณะ (/api/room-types) — ใช้ทำแท็บกรองประเภทในหน้าเลือกห้องของลูกค้า
 // (การเพิ่ม/แก้ไขประเภทอยู่ที่ /api/admin/room-types)
+// (SQL ในไฟล์นี้: $1, JOIN, COALESCE, RETURNING ฯลฯ ดูคำอธิบายพื้นฐานที่ routes/bookings.routes.js)
 const router = require('express').Router();
 const { pool } = require('../db');
 const { route } = require('../utils/http');
@@ -8,6 +9,7 @@ const { route } = require('../utils/http');
 router.get(
   '/',
   route(async (req, res) => {
+    // LEFT JOIN เฉพาะห้องที่เปิดอยู่ + GROUP BY ทีละประเภท → นับห้อง (COUNT), นับห้องธีม (FILTER), ราคาถูกสุด (MIN)
     const types = await pool.query(
       `SELECT t.*,
               COUNT(r.room_id)::int AS room_count,
