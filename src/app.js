@@ -55,6 +55,7 @@ app.use((req, res) => {
 // รหัส error ของฐานข้อมูลที่แปลว่า "ข้อมูลที่ส่งมาผิดรูปแบบ" (ความผิดของผู้ส่ง ไม่ใช่ระบบพัง) → ตอบ 400
 // 22P02 = ชนิดข้อมูลผิด เช่น /api/rooms/abc, 22007/22008 = วันที่-เวลาผิด,
 // 22003 = ตัวเลขใหญ่เกิน, 23514 = ผิดเงื่อนไขที่ตั้งไว้ในตาราง (CHECK)
+// (22001 = ข้อความยาวเกินขนาดช่องในตาราง แยกตอบข้อความเฉพาะไว้ด้านล่าง)
 const PG_BAD_INPUT_CODES = ['22P02', '22007', '22008', '22003', '23514'];
 
 // ตัวจัดการ error กลาง — ทุก error ในระบบมาจบที่นี่
@@ -65,6 +66,7 @@ app.use((err, req, res, next) => {
     return res.status(err.status).json({ error: err.message, ...(err.code && { code: err.code }) });
   if (err.type === 'entity.parse.failed')
     return res.status(400).json({ error: 'ข้อมูลที่ส่งมาไม่ใช่ JSON ที่ถูกต้อง' });
+  if (err.code === '22001') return res.status(400).json({ error: 'ข้อความบางช่องยาวเกินกำหนด กรุณาตรวจสอบอีกครั้ง' });
   if (PG_BAD_INPUT_CODES.includes(err.code))
     return res.status(400).json({ error: 'ข้อมูลที่ส่งมาไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง' });
   console.error(err);
